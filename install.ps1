@@ -54,7 +54,7 @@ if (-not (Test-Path $cfgPath)) {
   } | ConvertTo-Json | Set-Content -Encoding UTF8 $cfgPath
   # only the current user can read the token
   icacls $cfgPath /inheritance:r /grant:r "$($env:USERNAME):(F)" | Out-Null
-  Write-Host "==> generated token (put this in the dashboard .env):" -ForegroundColor Green
+  Write-Host "==> generated token (paste it as the agent token under Add host in the dashboard):" -ForegroundColor Green
   Write-Host "    $Token"
 } else {
   Write-Host "==> keeping existing $cfgPath"
