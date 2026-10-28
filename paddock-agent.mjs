@@ -36,7 +36,7 @@ import crypto from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.5.0-dev.1";
+const VERSION = "0.5.0-dev.2";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fileCfg = (() => {
   try { return JSON.parse(fs.readFileSync(path.join(HERE, "agent.json"), "utf8")); } catch { return {}; }
