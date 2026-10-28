@@ -46,12 +46,14 @@ if (-not (Test-Path $cfgPath)) {
     [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
     $Token = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_')
   }
-  @{
+  $json = @{
     PADDOCK_AGENT_TOKEN = $Token
     PADDOCK_AGENT_BIND  = "0.0.0.0"
     PADDOCK_AGENT_PORT  = "$Port"
     PADDOCK_DISK_PATHS  = ""
-  } | ConvertTo-Json | Set-Content -Encoding UTF8 $cfgPath
+  } | ConvertTo-Json
+  # UTF-8 without a BOM: Windows PowerShell's Set-Content -Encoding UTF8 adds one
+  [IO.File]::WriteAllText($cfgPath, $json, (New-Object Text.UTF8Encoding $false))
   # only the current user can read the token
   icacls $cfgPath /inheritance:r /grant:r "$($env:USERNAME):(F)" | Out-Null
   Write-Host "==> generated token (paste it as the agent token under Add host in the dashboard):" -ForegroundColor Green
