@@ -17,7 +17,8 @@
  * variables, and is a tray app running in the user's session.
  *
  * Only variables matching MANAGED_RE (OLLAMA_*, CUDA_*, ...) or ones added
- * through the dashboard are ever shown or changed — never Path, TEMP, etc.
+ * through the dashboard are ever shown — never Path, TEMP, etc. — and only
+ * those in ENV_ALLOW can be changed.
  *
  * Settings come from agent.json next to this file, overridden by environment
  * variables of the same name:
@@ -26,6 +27,8 @@
  *   PADDOCK_AGENT_PORT    default 11435
  *   PADDOCK_OLLAMA_APP    default %LOCALAPPDATA%\Programs\Ollama\ollama app.exe
  *   PADDOCK_DISK_PATHS    extra drives/folders to report, comma separated
+ *   PADDOCK_AGENT_ENV_ALLOW extra variable names the dashboard may set, comma separated
+ *                         (a trailing * allows a prefix: "HSA_*,MY_VAR"); see ENV_ALLOW
  *   PADDOCK_DRY_RUN       "1" = never kill/start Ollama (testing)
  */
 import http from "node:http";
@@ -65,6 +68,20 @@ const DRY_RUN = String(cfg("PADDOCK_DRY_RUN")) === "1";
 const EXTRA_DISKS = String(cfg("PADDOCK_DISK_PATHS")).split(",").map((s) => s.trim()).filter(Boolean);
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const MANAGED_RE = /^(OLLAMA_|CUDA_|HIP_|ROCR_|HSA_|GGML_|GPU_DEVICE_ORDINAL$)/i;
+// Variables the dashboard may set. Anything else (CUDA_INJECTION64_PATH, HSA_TOOLS_LIB, …) could
+// load code into Ollama, so a dashboard login or agent token must not be enough to set it.
+// The host can extend the list through PADDOCK_AGENT_ENV_ALLOW; variables already set that
+// aren't listed are kept as they are and reported read-only. Keep in step with the Linux agent.
+const ENV_ALLOW = [
+  "OLLAMA_*",
+  "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES", "GPU_DEVICE_ORDINAL",
+  "HSA_OVERRIDE_GFX_VERSION", "GGML_CUDA_ENABLE_UNIFIED_MEMORY",
+  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+  ...String(cfg("PADDOCK_AGENT_ENV_ALLOW")).split(",").map((s) => s.trim()).filter(Boolean),
+];
+const envAllowed = (name) => ENV_ALLOW.some((p) => p.endsWith("*")
+  ? name.toUpperCase().startsWith(p.slice(0, -1).toUpperCase())
+  : name.toUpperCase() === p.toUpperCase());
 
 // ------------------------------------------------------------------ helpers
 function run(cmd, args, timeoutMs = 15_000, opts = {}) {
@@ -255,12 +272,15 @@ async function readEnvState() {
     raw: Object.entries(managed).map(([k, v]) => `${k}=${v}`).join("\n"),
     effective: { ...machineManaged, ...managed },
     external,
+    allowed: ENV_ALLOW,
   };
 }
 
 async function putEnv(body) {
   const vars = body?.vars;
   if (!vars || typeof vars !== "object" || Array.isArray(vars)) throw httpError(400, "body must be {vars: {...}, restart?: bool}");
+  const before = await readEnvState();
+  const existing = (k) => Object.entries(before.managed).find(([e]) => e.toLowerCase() === k.toLowerCase())?.[1];
   for (const [k, v] of Object.entries(vars)) {
     if (!KEY_RE.test(k)) throw httpError(400, `invalid variable name: ${JSON.stringify(k)}`);
     if (typeof v !== "string") throw httpError(400, `value of ${k} must be a string`);
@@ -268,13 +288,19 @@ async function putEnv(body) {
     if (/^(path|pathext|temp|tmp|userprofile|appdata|localappdata|systemroot|windir|comspec)$/i.test(k)) {
       throw httpError(400, `${k} is a system variable and can't be managed here`);
     }
+    if (!envAllowed(k) && existing(k) !== v) {
+      throw httpError(400, `${k} is not an Ollama variable; add it to PADDOCK_AGENT_ENV_ALLOW on the host to manage it here`);
+    }
   }
-  const before = await readEnvState();
   const state = loadState();
-  // set everything given; remove managed vars that were dropped
-  const changes = { ...vars };
-  for (const k of Object.keys(before.managed)) if (!(k in vars)) changes[k] = null;
-  state.customKeys = Object.keys(vars).filter((k) => !MANAGED_RE.test(k));
+  // set the allowed vars given and remove the allowed ones that were dropped; anything outside
+  // the allowlist stays exactly as it is, whether or not the request mentions it
+  const changes = Object.fromEntries(Object.entries(vars).filter(([k]) => envAllowed(k)));
+  for (const k of Object.keys(before.managed)) if (!(k in vars) && envAllowed(k)) changes[k] = null;
+  state.customKeys = [...new Set([
+    ...Object.keys(changes).filter((k) => changes[k] !== null && !MANAGED_RE.test(k)),
+    ...Object.keys(before.managed).filter((k) => !envAllowed(k) && !MANAGED_RE.test(k)),
+  ])];
 
   // SetEnvironmentVariable(User) writes HKCU\Environment and broadcasts WM_SETTINGCHANGE
   await powershell(`
