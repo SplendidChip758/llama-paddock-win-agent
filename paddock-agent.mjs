@@ -397,7 +397,7 @@ const routes = {
   "GET /health": async () => ({ ok: true, version: VERSION, platform: "windows", hostname: os.hostname() }),
   "GET /stats": async () => {
     const [system, nvidia, service] = await Promise.all([systemStats(), nvidiaStats(), serviceStatus()]);
-    return { ts: Date.now() / 1000, platform: "windows", system, nvidia, service };
+    return { ts: Date.now() / 1000, version: VERSION, platform: "windows", system, nvidia, service };
   },
   "GET /env": async () => readEnvState(),
   "PUT /env": async (req) => putEnv(await readJson(req)),
