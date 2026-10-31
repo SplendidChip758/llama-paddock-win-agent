@@ -12,6 +12,7 @@
  *   PUT  /env               {vars, restart} — set/remove them, optionally restart Ollama
  *   POST /service/restart   restart the Ollama app with the current environment
  *   GET  /logs?lines=N      tail of %LOCALAPPDATA%\Ollama\server.log
+ * The port serves HTTPS with the agent's own key, and plain HTTP unless PADDOCK_AGENT_HTTP=off.
  *
  * Why user variables: Ollama for Windows reads the account's environment
  * variables, and is a tray app running in the user's session.
@@ -25,6 +26,9 @@
  *   PADDOCK_AGENT_TOKEN   required shared secret
  *   PADDOCK_AGENT_BIND    default 0.0.0.0
  *   PADDOCK_AGENT_PORT    default 11435
+ *   PADDOCK_AGENT_HTTP    "off" = HTTPS only (default on, so dashboards from before 0.7.0 keep working)
+ *   PADDOCK_AGENT_TLS_KEY  default agent.key next to this file, created on first start
+ *   PADDOCK_AGENT_TLS_CERT default agent.crt next to this file, self-signed from the key when missing
  *   PADDOCK_OLLAMA_APP    default %LOCALAPPDATA%\Programs\Ollama\ollama app.exe
  *   PADDOCK_DISK_PATHS    extra drives/folders to report, comma separated
  *   PADDOCK_AGENT_ENV_ALLOW extra variable names the dashboard may set, comma separated
@@ -32,6 +36,8 @@
  *   PADDOCK_DRY_RUN       "1" = never kill/start Ollama (testing)
  */
 import http from "node:http";
+import https from "node:https";
+import net from "node:net";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -64,6 +70,9 @@ const TOKEN = String(cfg("PADDOCK_AGENT_TOKEN"));
 const OLLAMA_APP = String(cfg("PADDOCK_OLLAMA_APP", path.join(LOCALAPPDATA, "Programs", "Ollama", "ollama app.exe")));
 const LOG_FILE = path.join(LOCALAPPDATA, "Ollama", "server.log");
 const STATE_FILE = path.join(HERE, "agent-state.json");
+const TLS_KEY = String(cfg("PADDOCK_AGENT_TLS_KEY", path.join(HERE, "agent.key")));
+const TLS_CERT = String(cfg("PADDOCK_AGENT_TLS_CERT", path.join(HERE, "agent.crt")));
+const HTTP_ON = String(cfg("PADDOCK_AGENT_HTTP", "on")).toLowerCase() !== "off";
 const DRY_RUN = String(cfg("PADDOCK_DRY_RUN")) === "1";
 const EXTRA_DISKS = String(cfg("PADDOCK_DISK_PATHS")).split(",").map((s) => s.trim()).filter(Boolean);
 const KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -396,6 +405,107 @@ function tailFile(file, lines) {
   }
 }
 
+// ------------------------------------------------------------------ TLS
+// The agent makes its own ECDSA key and a self-signed certificate for it. Node can't write X.509
+// certificates, and Windows has no openssl, so a minimal DER encoder builds one. The dashboard pins
+// the key (SHA-256 of its SPKI), not the certificate: the certificate never expires, and making a
+// new one from the same key needs no new pin. Keep this section the same in both agents.
+function derLength(n) {
+  if (n < 0x80) return Buffer.from([n]);
+  const bytes = [];
+  for (; n; n >>= 8) bytes.unshift(n & 0xff);
+  return Buffer.from([0x80 | bytes.length, ...bytes]);
+}
+function der(tag, ...parts) {
+  const body = Buffer.concat(parts.map((p) => (typeof p === "string" ? Buffer.from(p) : p)));
+  return Buffer.concat([Buffer.from([tag]), derLength(body.length), body]);
+}
+const derSeq = (...parts) => der(0x30, ...parts);
+function derOid(dotted) {
+  const [a, b, ...rest] = dotted.split(".").map(Number);
+  const out = [40 * a + b];
+  for (let v of rest) {
+    const group = [v & 0x7f];
+    while ((v >>= 7)) group.unshift((v & 0x7f) | 0x80);
+    out.push(...group);
+  }
+  return der(0x06, Buffer.from(out));
+}
+
+function selfSignedCert(privateKey) {
+  const serial = crypto.randomBytes(16);
+  serial[0] = (serial[0] & 0x7f) | 0x40; // positive, and no leading zero byte
+  const ecdsaSha256 = derSeq(derOid("1.2.840.10045.4.3.2"));
+  const name = derSeq(der(0x31, derSeq(derOid("2.5.4.3"), der(0x0c, "llama-paddock-agent"))));
+  const notBefore = new Date(Date.now() - 3600_000).toISOString().replace(/[-:T]/g, "").slice(2, 14) + "Z";
+  const tbs = derSeq(
+    der(0xa0, der(0x02, Buffer.from([2]))), // v3
+    der(0x02, serial),
+    ecdsaSha256,
+    name,
+    // 9999-12-31: no expiry (RFC 5280, 4.1.2.5)
+    derSeq(der(0x17, notBefore), der(0x18, "99991231235959Z")),
+    name,
+    crypto.createPublicKey(privateKey).export({ type: "spki", format: "der" }),
+    der(0xa3, derSeq(derSeq(derOid("2.5.29.19"), der(0x01, Buffer.from([0xff])), der(0x04, derSeq())))), // CA: false
+  );
+  const cert = derSeq(tbs, ecdsaSha256, der(0x03, Buffer.from([0]), crypto.sign("sha256", tbs, privateKey)));
+  return `-----BEGIN CERTIFICATE-----\n${cert.toString("base64").match(/.{1,64}/g).join("\n")}\n-----END CERTIFICATE-----\n`;
+}
+
+/** SHA256:<base64>, the same as `openssl x509 -pubkey | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64`. */
+const keyFingerprint = (publicKey) =>
+  `SHA256:${crypto.createHash("sha256").update(publicKey.export({ type: "spki", format: "der" })).digest("base64").replace(/=+$/, "")}`;
+
+/** The key and certificate to serve, made on first start. A missing certificate is made again from the key. */
+function loadTls() {
+  const read = (p) => { try { return fs.readFileSync(p, "utf8"); } catch (e) { if (e.code === "ENOENT") return null; throw e; } };
+  let key = read(TLS_KEY);
+  if (key === null) {
+    key = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" }).privateKey.export({ type: "pkcs8", format: "pem" });
+    fs.mkdirSync(path.dirname(TLS_KEY), { recursive: true });
+    fs.writeFileSync(TLS_KEY, key, { mode: 0o600, flag: "wx" });
+    console.log(`created a TLS key in ${TLS_KEY}`);
+  }
+  let cert = read(TLS_CERT);
+  if (cert === null) {
+    cert = selfSignedCert(crypto.createPrivateKey(key));
+    fs.writeFileSync(TLS_CERT, cert, { mode: 0o644, flag: "wx" });
+  }
+  return { key, cert, fingerprint: keyFingerprint(new crypto.X509Certificate(cert).publicKey) };
+}
+
+/** Serve HTTPS and (unless HTTP_ON is false) plain HTTP on one port: a TLS connection starts with a handshake record. */
+function listenBoth(onRequest, port, bind, label) {
+  let tls = null;
+  try {
+    tls = loadTls();
+  } catch (e) {
+    if (!HTTP_ON) {
+      console.error(`can't set up TLS (${e.message}), and PADDOCK_AGENT_HTTP=off leaves nothing to serve`);
+      process.exit(1);
+    }
+    console.error(`can't set up TLS (${e.message}); serving plain HTTP only`);
+  }
+  const plain = http.createServer(onRequest);
+  const secure = tls && https.createServer({ key: tls.key, cert: tls.cert }, onRequest);
+  const front = net.createServer((socket) => {
+    socket.on("error", () => socket.destroy());
+    // the servers behind it never listen themselves, so their request timeouts don't apply: limit the wait here
+    socket.setTimeout(10_000, () => socket.destroy());
+    socket.once("readable", () => {
+      const head = socket.read(1);
+      if (!head) return socket.destroy();
+      socket.setTimeout(0);
+      socket.unshift(head);
+      (head[0] === 0x16 && secure ? secure : plain).emit("connection", socket);
+    });
+  });
+  const modes = [tls && "HTTPS", HTTP_ON && "HTTP"].filter(Boolean).join(" + ");
+  front.listen(port, bind, () => console.log(`${label} listening on ${bind}:${port} (${modes})${tls ? `, key ${tls.fingerprint}` : ""}`));
+  return tls?.fingerprint ?? null;
+}
+
 // ------------------------------------------------------------------ HTTP
 function httpError(status, detail) {
   return Object.assign(new Error(detail), { status });
@@ -420,10 +530,10 @@ async function readJson(req) {
 }
 
 const routes = {
-  "GET /health": async () => ({ ok: true, version: VERSION, platform: "windows", hostname: os.hostname() }),
+  "GET /health": async () => ({ ok: true, version: VERSION, platform: "windows", hostname: os.hostname(), fingerprint: FINGERPRINT }),
   "GET /stats": async () => {
     const [system, nvidia, service] = await Promise.all([systemStats(), nvidiaStats(), serviceStatus()]);
-    return { ts: Date.now() / 1000, version: VERSION, platform: "windows", system, nvidia, service };
+    return { ts: Date.now() / 1000, version: VERSION, platform: "windows", fingerprint: FINGERPRINT, system, nvidia, service };
   },
   "GET /env": async () => readEnvState(),
   "PUT /env": async (req) => putEnv(await readJson(req)),
@@ -434,13 +544,15 @@ const routes = {
   },
 };
 
-const server = http.createServer(async (req, res) => {
+async function onRequest(req, res) {
   const url = new URL(req.url, "http://agent");
   const handler = routes[`${req.method} ${url.pathname}`];
   const send = (status, body) => {
     res.writeHead(status, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
   };
+  // the fingerprint lets the dashboard offer the switch to https://
+  if (!req.socket.encrypted && !HTTP_ON) return send(426, { detail: "this agent only accepts HTTPS: use https:// in the agent URL", fingerprint: FINGERPRINT });
   if (!handler) return send(404, { detail: "not found" });
   if (url.pathname !== "/health" && !authorized(req)) return send(401, { detail: "invalid agent token" });
   try {
@@ -448,7 +560,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     send(e.status || 500, { detail: e.message });
   }
-});
+}
 
 if (!TOKEN) {
   console.error("PADDOCK_AGENT_TOKEN must be set (agent.json or environment)");
@@ -456,4 +568,4 @@ if (!TOKEN) {
 }
 const port = Number(cfg("PADDOCK_AGENT_PORT", "11435"));
 const bind = String(cfg("PADDOCK_AGENT_BIND", "0.0.0.0"));
-server.listen(port, bind, () => console.log(`llama-paddock agent ${VERSION} (windows) listening on ${bind}:${port}`));
+const FINGERPRINT = listenBoth(onRequest, port, bind, `llama-paddock agent ${VERSION} (windows)`);

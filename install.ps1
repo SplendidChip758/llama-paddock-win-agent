@@ -8,15 +8,20 @@
   - Registers a Scheduled Task that starts the agent hidden when you log on,
     in your own session, so it can restart the Ollama tray app
   - Adds an inbound firewall rule for the agent port (needs an elevated shell)
+  - Prints the fingerprint of the agent's HTTPS key (agent.key, made on its first
+    start) for the dashboard. New installs serve HTTPS only; updated ones keep
+    plain HTTP on until you set PADDOCK_AGENT_HTTP to "off" in agent.json
 
   Run it from the user account that runs Ollama:
     powershell -ExecutionPolicy Bypass -File .\install.ps1
   Optional: -Token <existing token>  -Port 11435  -AllowFrom 192.168.30.0/24
+            -NewKey  replace the agent's HTTPS key (accept the new one in the dashboard afterwards)
 #>
 param(
   [string]$Token = "",
   [int]$Port = 11435,
-  [string]$AllowFrom = "LocalSubnet"
+  [string]$AllowFrom = "LocalSubnet",
+  [switch]$NewKey
 )
 $ErrorActionPreference = "Stop"
 $TaskName = "llama-paddock-agent"
@@ -51,6 +56,8 @@ if (-not (Test-Path $cfgPath)) {
     PADDOCK_AGENT_BIND  = "0.0.0.0"
     PADDOCK_AGENT_PORT  = "$Port"
     PADDOCK_DISK_PATHS  = ""
+    # HTTPS only; "on" also serves plain HTTP, for dashboards before 0.7.0
+    PADDOCK_AGENT_HTTP  = "off"
   } | ConvertTo-Json
   # UTF-8 without a BOM: Windows PowerShell's Set-Content -Encoding UTF8 adds one
   [IO.File]::WriteAllText($cfgPath, $json, (New-Object Text.UTF8Encoding $false))
@@ -60,6 +67,17 @@ if (-not (Test-Path $cfgPath)) {
   Write-Host "    $Token"
 } else {
   Write-Host "==> keeping existing $cfgPath"
+}
+
+if ($NewKey) {
+  $cfg = Get-Content -Raw $cfgPath | ConvertFrom-Json
+  # only the agent's own key: one you put in place yourself is yours to replace
+  if ($cfg.PADDOCK_AGENT_TLS_KEY -or $cfg.PADDOCK_AGENT_TLS_CERT) {
+    Write-Host "PADDOCK_AGENT_TLS_KEY/CERT in agent.json point to your own files; replace those yourself" -ForegroundColor Red
+    exit 1
+  }
+  Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $Dir "agent.key"), (Join-Path $Dir "agent.crt")
+  Write-Host "==> removed the agent's key; it makes a new one when it starts"
 }
 
 # --- scheduled task (runs hidden at logon, restarts on failure) -------------
@@ -96,9 +114,22 @@ if ($admin) {
 }
 
 Start-Sleep -Seconds 2
-try {
-  $h = Invoke-RestMethod "http://127.0.0.1:$Port/health" -TimeoutSec 5
+# Ask through Node: Windows PowerShell can't skip the check of the agent's self-signed certificate
+# (it's the agent's own, on the loopback interface). HTTPS first, plain HTTP if it can't serve that.
+$probe = "const get=(m,o)=>new Promise((res,rej)=>require(m).get({host:'127.0.0.1',port:$Port,path:'/health',timeout:5000,...o},(r)=>{let s='';r.on('data',(d)=>s+=d).on('end',()=>res(s))}).on('error',rej));get('https',{rejectUnauthorized:false}).catch(()=>get('http',{})).then((s)=>console.log(s),()=>process.exit(1))"
+$out = & $node -e $probe 2>$null
+if ($LASTEXITCODE -eq 0 -and $out) {
+  $h = $out | ConvertFrom-Json
   Write-Host "==> health: ok (agent $($h.version) on $($h.hostname))" -ForegroundColor Green
-} catch {
+  if ($h.fingerprint) {
+    Write-Host "==> in the dashboard (Add host), use agent URL https://<this PC's address>:$Port and this key fingerprint:" -ForegroundColor Green
+    Write-Host "    $($h.fingerprint)"
+    if ($NewKey) {
+      Write-Host "==> the key is new: the dashboard shows that it changed. Compare it with the fingerprint above, then accept it."
+    }
+  } else {
+    Write-Host "==> the agent serves plain HTTP only: it couldn't set up its HTTPS key (see its output in Task Scheduler)" -ForegroundColor Yellow
+  }
+} else {
   Write-Host "==> agent not answering yet; check Task Scheduler > $TaskName" -ForegroundColor Yellow
 }
