@@ -15,6 +15,7 @@
  *   GET  /gpu-check         GPU lines from server.log since Ollama started, for the dashboard's GPU check
  *   POST /gpu/reload-uvm    Linux only: answers 400 here
  *   GET  /runner-starts?since=T  when Ollama started model runners, from server.log
+ *   GET  /requests?since=T  Ollama's request log lines after T (unix seconds)
  * The port serves HTTPS with the agent's own key, and plain HTTP unless PADDOCK_AGENT_HTTP=off.
  *
  * Why user variables: Ollama for Windows reads the account's environment
@@ -475,6 +476,110 @@ function runnerStarts(since) {
   }
 }
 
+// ------------------------------------------------------------------ request log
+// Ollama logs each HTTP request through gin, one line per request:
+//   [GIN] 2026/11/02 - 09:14:07 | 200 |  4.551040958s |   192.168.30.20 | POST     "/api/chat"
+// Only these fields are read; Ollama's log has no prompts or responses. A line that starts like one
+// but doesn't parse, such as from a newer Ollama, is counted as skipped rather than misread.
+// Keep this section the same in both agents.
+const GIN_PREFIX = "[GIN] ";
+const DURATION_MS = { h: 3600e3, m: 60e3, s: 1e3, ms: 1, "µs": 1e-3, us: 1e-3, ns: 1e-6 };
+/** Requests one call returns at most; the dashboard asks again from where it stopped. */
+const REQUESTS_MAX = 5000;
+/** A log file is read from its end, at most this much of it. */
+const REQUEST_LOG_TAIL_BYTES = 8 * 1024 * 1024;
+
+/** Go's time.Duration text ("4.55s", "1m2.5s", "735.1µs") in milliseconds, or null. */
+function goDurationMs(text) {
+  let ms = 0, rest = text;
+  if (!rest) return null;
+  while (rest) {
+    const m = /^(\d+(?:\.\d+)?)(h|ms|m|s|µs|us|ns)/.exec(rest);
+    if (!m) return null;
+    ms += Number(m[1]) * DURATION_MS[m[2]];
+    rest = rest.slice(m[0].length);
+  }
+  return ms;
+}
+
+/** A gin request line: null if the line isn't one, `{skipped: true}` if it looks like one but doesn't parse. */
+function parseRequestLine(line) {
+  const at = line.indexOf(GIN_PREFIX);
+  if (at < 0) return null;
+  const parts = line.slice(at + GIN_PREFIX.length).split("|").map((p) => p.trim());
+  if (parts.length !== 5) return { skipped: true };
+  const [when, status, latency, client, call] = parts;
+  const d = /^(\d{4})\/(\d{2})\/(\d{2}) - (\d{2}):(\d{2}):(\d{2})$/.exec(when);
+  const c = /^([A-Z]+) +"([^"]*)"$/.exec(call);
+  const ms = goDurationMs(latency);
+  if (!d || !/^\d{3}$/.test(status) || ms === null || !c || !client || /\s/.test(client)) return { skipped: true };
+  return {
+    // gin writes the host's local time without a zone
+    local: new Date(+d[1], +d[2] - 1, +d[3], +d[4], +d[5], +d[6]).getTime() / 1000,
+    status: Number(status), duration_ms: Math.round(ms * 1000) / 1000, client, method: c[1],
+    // the query string is dropped: it isn't needed to tell endpoints apart
+    path: c[2].split("?")[0],
+  };
+}
+
+/** The last `maxBytes` of a file as lines (the first, likely cut, is dropped when the file is longer). */
+function tailLines(file, maxBytes) {
+  let fd;
+  try {
+    fd = fs.openSync(file, "r");
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, maxBytes);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const lines = buf.toString("utf8").split(/\r?\n/);
+    return size > len ? lines.slice(1) : lines;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * The requests in (since, until] from log entries `{t, line}` in time order (`t`: an exact time
+ * from the journal, or null to use the line's own). At most REQUESTS_MAX are returned; `until` then
+ * says how far they reach, and `more` that the caller should ask again from there.
+ */
+function collectRequests(entries, since, until) {
+  const requests = [];
+  let skipped = 0;
+  for (const e of entries) {
+    const r = parseRequestLine(e.line);
+    if (!r) continue;
+    if (r.skipped) {
+      skipped++;
+      continue;
+    }
+    const t = e.t ?? r.local;
+    if (t <= since || t > until) continue;
+    if (requests.length === REQUESTS_MAX) {
+      // a log file's lines have whole seconds: end just before the last one, so its other requests
+      // come with the next call (the dashboard drops the ones it already has)
+      const last = requests[requests.length - 1].t;
+      return { requests: requests.filter((x) => x.t < last), until: last - 0.001, more: true, skipped };
+    }
+    const { local: _local, ...rest } = r;
+    requests.push({ t, ...rest });
+  }
+  return { requests, until, more: false, skipped };
+}
+
+function readRequests(since) {
+  const now = Date.now() / 1000;
+  let lines;
+  try {
+    lines = tailLines(LOG_FILE, REQUEST_LOG_TAIL_BYTES);
+  } catch (e) {
+    // Ollama hasn't written a log yet
+    if (e.code === "ENOENT") return collectRequests([], since, now);
+    throw httpError(500, `can't read ${LOG_FILE}: ${e.message}`);
+  }
+  return collectRequests(lines.map((line) => ({ t: null, line })), since, now);
+}
+
 // ------------------------------------------------------------------ TLS
 // The agent makes its own ECDSA key and a self-signed certificate for it. Node can't write X.509
 // certificates, and Windows has no openssl, so a minimal DER encoder builds one. The dashboard pins
@@ -620,6 +725,11 @@ const routes = {
     const now = Date.now() / 1000;
     const since = Math.max(now - 86400, Math.min(Number(url.searchParams.get("since")) || now - 3600, now));
     return { ts: now, ...runnerStarts(since) };
+  },
+  // ?since=<unix seconds>: the requests after it, from Ollama's log
+  "GET /requests": async (_req, url) => {
+    const since = Number(url.searchParams.get("since"));
+    return readRequests(Number.isFinite(since) && since > 0 ? since : Date.now() / 1000 - 3600);
   },
 };
 
