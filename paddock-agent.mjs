@@ -14,6 +14,7 @@
  *   GET  /logs?lines=N      tail of %LOCALAPPDATA%\Ollama\server.log
  *   GET  /gpu-check         GPU lines from server.log since Ollama started, for the dashboard's GPU check
  *   POST /gpu/reload-uvm    Linux only: answers 400 here
+ *   GET  /runner-starts?since=T  when Ollama started model runners, from server.log
  * The port serves HTTPS with the agent's own key, and plain HTTP unless PADDOCK_AGENT_HTTP=off.
  *
  * Why user variables: Ollama for Windows reads the account's environment
@@ -444,6 +445,36 @@ function gpuLog() {
   }
 }
 
+// ------------------------------------------------------------------ model loads
+// Ollama logs "llama runner started in N seconds" once per model load. The dashboard only sees
+// loads that last until a poll, so these times tell it about models that load and unload between
+// polls, such as when a client sends keep_alive 0. Keep RUNNER_STARTED_RE the same in both agents.
+const RUNNER_STARTED_RE = /llama runner started in/;
+
+/** server.log only covers the current run of Ollama, so starts before it are missing. */
+function runnerStarts(since) {
+  const TAIL = 16 * 1024 * 1024;
+  let fd;
+  try {
+    fd = fs.openSync(LOG_FILE, "r");
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, TAIL);
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, size - len);
+    const starts = [];
+    for (const l of buf.toString("utf8").split(/\r?\n/)) {
+      if (!RUNNER_STARTED_RE.test(l)) continue;
+      const t = Date.parse(/time=(\S+)/.exec(l)?.[1] ?? "") / 1000;
+      if (t >= since) starts.push(t);
+    }
+    return { starts };
+  } catch (e) {
+    return { starts: [], error: `cannot read ${LOG_FILE}: ${e.message}` };
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 // ------------------------------------------------------------------ TLS
 // The agent makes its own ECDSA key and a self-signed certificate for it. Node can't write X.509
 // certificates, and Windows has no openssl, so a minimal DER encoder builds one. The dashboard pins
@@ -584,6 +615,11 @@ const routes = {
   "GET /gpu-check": async () => ({ ts: Date.now() / 1000, platform: "windows", log: gpuLog() }),
   "POST /gpu/reload-uvm": async () => {
     throw httpError(400, "nvidia_uvm is a Linux kernel module; on Windows, restart Ollama instead");
+  },
+  "GET /runner-starts": async (_req, url) => {
+    const now = Date.now() / 1000;
+    const since = Math.max(now - 86400, Math.min(Number(url.searchParams.get("since")) || now - 3600, now));
+    return { ts: now, ...runnerStarts(since) };
   },
 };
 
