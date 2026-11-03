@@ -12,6 +12,8 @@
  *   PUT  /env               {vars, restart} — set/remove them, optionally restart Ollama
  *   POST /service/restart   restart the Ollama app with the current environment
  *   GET  /logs?lines=N      tail of %LOCALAPPDATA%\Ollama\server.log
+ *   GET  /gpu-check         GPU lines from server.log since Ollama started, for the dashboard's GPU check
+ *   POST /gpu/reload-uvm    Linux only: answers 400 here
  * The port serves HTTPS with the agent's own key, and plain HTTP unless PADDOCK_AGENT_HTTP=off.
  *
  * Why user variables: Ollama for Windows reads the account's environment
@@ -405,6 +407,43 @@ function tailFile(file, lines) {
   }
 }
 
+// ------------------------------------------------------------------ GPU check
+// Ollama falls back to the CPU without an error when it can't use the GPU. The dashboard compares
+// where models are loaded with nvidia-smi, and these lines from Ollama's log since its last start
+// give it the evidence: discovery at startup, CUDA/ROCm errors later. The dashboard decides what
+// the lines mean, so newer Ollama wording only needs a dashboard update.
+// Keep GPU_LOG_RE and gpuLogLines() the same in both agents.
+const GPU_LOG_RE = /cuda|cudart|nvcuda|nvml|nvidia|rocm|\bhip\b|amdgpu|gpu|vram|inference compute|offload|library=/i;
+const GPU_LOG_KEEP = 150;
+
+function gpuLogLines(lines) {
+  const hits = lines.filter((l) => GPU_LOG_RE.test(l) && !l.includes("[GIN]")).map((l) => (l.length > 500 ? `${l.slice(0, 500)}…` : l));
+  // the start of the run holds discovery, the end the latest errors
+  return hits.length > 2 * GPU_LOG_KEEP ? [...hits.slice(0, GPU_LOG_KEEP), ...hits.slice(-GPU_LOG_KEEP)] : hits;
+}
+
+/** Ollama for Windows starts a new server.log each time it starts, so the file is the current run. */
+function gpuLog() {
+  const HEAD = 4 * 1024 * 1024, TAIL = 16 * 1024 * 1024;
+  let fd;
+  try {
+    fd = fs.openSync(LOG_FILE, "r");
+    const size = fs.fstatSync(fd).size;
+    const read = (pos, len) => {
+      const buf = Buffer.alloc(len);
+      fs.readSync(fd, buf, 0, len, pos);
+      return buf.toString("utf8").split(/\r?\n/);
+    };
+    // a long run's log is read at both ends: discovery is at the start, the latest errors at the end
+    const lines = size <= HEAD + TAIL ? read(0, size) : [...read(0, HEAD).slice(0, -1), ...read(size - TAIL, TAIL).slice(1)];
+    return { source: "server.log", lines: gpuLogLines(lines) };
+  } catch (e) {
+    return { source: "server.log", lines: [], error: `cannot read ${LOG_FILE}: ${e.message}` };
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
 // ------------------------------------------------------------------ TLS
 // The agent makes its own ECDSA key and a self-signed certificate for it. Node can't write X.509
 // certificates, and Windows has no openssl, so a minimal DER encoder builds one. The dashboard pins
@@ -541,6 +580,10 @@ const routes = {
   "GET /logs": async (_req, url) => {
     const lines = Math.max(10, Math.min(Number(url.searchParams.get("lines")) || 200, 2000));
     return { lines: tailFile(LOG_FILE, lines) };
+  },
+  "GET /gpu-check": async () => ({ ts: Date.now() / 1000, platform: "windows", log: gpuLog() }),
+  "POST /gpu/reload-uvm": async () => {
+    throw httpError(400, "nvidia_uvm is a Linux kernel module; on Windows, restart Ollama instead");
   },
 };
 
