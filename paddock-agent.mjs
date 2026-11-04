@@ -539,9 +539,9 @@ function tailLines(file, maxBytes) {
 }
 
 /**
- * The requests in (since, until] from log entries `{t, line}` in time order (`t`: an exact time
- * from the journal, or null to use the line's own). At most REQUESTS_MAX are returned; `until` then
- * says how far they reach, and `more` that the caller should ask again from there.
+ * The requests after `since` and up to `until` from log entries `{t, line}` in time order (`t`: an
+ * exact time from the journal, or null to use the line's own). At most REQUESTS_MAX are returned;
+ * `until` then says how far they reach, and `more` that the caller should ask again from there.
  */
 function collectRequests(entries, since, until) {
   const requests = [];
@@ -554,12 +554,14 @@ function collectRequests(entries, since, until) {
       continue;
     }
     const t = e.t ?? r.local;
-    if (t <= since || t > until) continue;
+    // a log file's lines have whole seconds, so one stamped with the second `since` falls in may
+    // have been written after it: those come again, and the dashboard drops the ones it already has
+    const whole = e.t === null;
+    if ((whole ? t + 1 : t) <= since || t > until) continue;
     if (requests.length === REQUESTS_MAX) {
-      // a log file's lines have whole seconds: end just before the last one, so its other requests
-      // come with the next call (the dashboard drops the ones it already has)
+      // end before the last request's time, so the others at that time come with the next call
       const last = requests[requests.length - 1].t;
-      return { requests: requests.filter((x) => x.t < last), until: last - 0.001, more: true, skipped };
+      return { requests: requests.filter((x) => x.t < last), until: whole ? last : last - 0.001, more: true, skipped };
     }
     const { local: _local, ...rest } = r;
     requests.push({ t, ...rest });
