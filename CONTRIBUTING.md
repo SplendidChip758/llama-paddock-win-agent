@@ -49,4 +49,4 @@ Branch from `dev` and open the PR against `dev`; it is squash-merged, so its tit
 
 ## How a release happens
 
-On a push to `main` or `dev` that changes the agent or its installer, the release workflow runs semantic-release (`.releaserc.json`). It stamps the version into the agent, updates `CHANGELOG.md`, tags the commit and publishes a GitHub release with `paddock-agent-windows.mjs`, `llama-paddock-agent-windows.zip` (the agent, `install.ps1` and `uninstall.ps1`) and `SHA256SUMS`.
+On a push to `main` or `dev` that changes the agent or its installer, the release workflow runs semantic-release (`.releaserc.json`). It stamps the version into the agent, updates `CHANGELOG.md`, tags the commit and publishes a GitHub release with `llama-paddock-agent-windows.zip` (the agent, `install.ps1` and `uninstall.ps1`) and `SHA256SUMS`, which lists the zip and the files in it.
