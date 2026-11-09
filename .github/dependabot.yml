@@ -1,0 +1,14 @@
+# The agent has no dependencies, so only the GitHub Actions are kept up to date.
+# Updates target dev, like every other change.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns: ["*"]

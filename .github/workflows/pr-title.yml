@@ -1,0 +1,19 @@
+# semantic-release derives the next version from commit messages, so PR titles
+# (the squash-merge commit message) must follow Conventional Commits:
+#   fix: …  → patch    feat: …  → minor    feat!: … / BREAKING CHANGE → minor while 0.x
+name: pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  conventional-title:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: amannn/action-semantic-pull-request@v6
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
