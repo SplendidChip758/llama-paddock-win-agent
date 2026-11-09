@@ -49,7 +49,7 @@ import crypto from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const VERSION = "0.9.0";
+const VERSION = "0.10.0-dev.1";
 // The agent API's protocol, reported in /health and /stats. Unlike VERSION it only goes up when the
 // API changes in a way older dashboards can't follow (a route or field removed or changing meaning),
 // never for fixes or new optional fields. The dashboard compares it with the range it supports.
