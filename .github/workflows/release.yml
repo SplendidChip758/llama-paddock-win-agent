@@ -1,0 +1,103 @@
+# On pushes to main or dev that touch the agent, semantic-release reads the
+# Conventional Commits since the last v* tag and, if any warrant a release:
+# stamps the version into the agent, updates CHANGELOG.md, commits that back
+# to the branch, tags it and creates a GitHub release with the agent, a zip of
+# it with its installer and uninstaller, and SHA256SUMS. Config: .releaserc.json
+#
+#   main → vX.Y.Z           stable release
+#   dev  → vX.Y.Z-dev.N     GitHub prerelease
+#
+# After a stable release, the backmerge job merges main back into dev, so the
+# release commit and tag are on dev and the next prerelease counts up from the
+# new version.
+name: release
+
+on:
+  push:
+    branches: [main, dev]
+    paths:
+      - "paddock-agent.mjs"
+      - "install.ps1"
+      - "uninstall.ps1"
+      - ".releaserc.json"
+      - ".github/workflows/release.yml"
+      - ".github/scripts/prepare-release.sh"
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.semrel.outputs.version }}
+      prerelease: ${{ contains(steps.semrel.outputs.version, '-') }}
+    steps:
+      # main and dev only accept PRs; the deploy key is the rulesets' bypass, so
+      # semantic-release can push the release commit and tag over SSH.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - id: semrel
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          npx --yes
+          -p semantic-release@25
+          -p @semantic-release/changelog@7
+          -p @semantic-release/git@11
+          -p @semantic-release/exec@7
+          -p conventional-changelog-conventionalcommits@9
+          semantic-release
+
+  # dev only accepts squash merges, which would drop the tag from dev's history,
+  # so the merge is pushed directly with the deploy key (the rulesets' bypass).
+  # On a conflict, it opens a PR from a backmerge/ branch to resolve it in.
+  backmerge:
+    needs: release
+    if: github.ref_name == 'main' && needs.release.outputs.prerelease == 'false' && needs.release.outputs.version != ''
+    runs-on: ubuntu-latest
+    env:
+      TAG: v${{ needs.release.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: dev
+          fetch-depth: 0
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
+
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge --no-ff -m "chore: merge main into dev after $TAG" "$TAG"; then
+            git push origin dev
+            exit 0
+          fi
+          git merge --abort
+          branch="backmerge/$TAG"
+          git push origin "$TAG^{commit}:refs/heads/$branch"
+          gh pr create --base dev --head "$branch" --title "chore: merge main into dev after $TAG" --body "$(cat <<EOF
+          Merging \`main\` back into \`dev\` after $TAG conflicted, so it couldn't be pushed automatically.
+
+          1. Resolve the conflicts in this PR (**Resolve conflicts**, or locally on \`$branch\`). That also starts the CI checks, which don't run on PRs opened by a workflow.
+          2. This PR needs a **merge commit**, but \`dev\` only allows squash merges. Allow merge commits on the \`dev\` ruleset (Settings → Rules → dev → Allowed merge methods), merge with **Create a merge commit**, then switch it back to squash only.
+
+          Don't squash it: the release tag would be missing from \`dev\`, and the next prerelease would reuse the version.
+          EOF
+          )"
+          echo "::error::Merging main into dev conflicted; resolve it in the backmerge PR."
+          exit 1
