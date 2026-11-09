@@ -44,7 +44,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 
 It needs Node.js 18.15 or newer (`winget install OpenJS.NodeJS.LTS`). The [Windows agent docs](https://github.com/SplendidChip758/llama-paddock/blob/main/docs/agent-windows.md) cover the options, updating, and adding the PC to the dashboard. `uninstall.ps1` removes it.
 
-Every release has `paddock-agent-windows.mjs`, `llama-paddock-agent-windows.zip` and `SHA256SUMS`.
+Every release has `llama-paddock-agent-windows.zip` and `SHA256SUMS`, which lists the zip and the files in it. Releases up to 0.10.0-dev.1 also have `paddock-agent-windows.mjs`.
 
 ## Versions and the protocol
 

@@ -29,7 +29,6 @@
       "@semantic-release/github",
       {
         "assets": [
-          { "path": "dist/paddock-agent-windows.mjs" },
           { "path": "dist/llama-paddock-agent-windows.zip" },
           { "path": "dist/SHA256SUMS" }
         ]
