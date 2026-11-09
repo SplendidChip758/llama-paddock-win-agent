@@ -50,6 +50,10 @@ import { execFile, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const VERSION = "0.9.0";
+// The agent API's protocol, reported in /health and /stats. Unlike VERSION it only goes up when the
+// API changes in a way older dashboards can't follow (a route or field removed or changing meaning),
+// never for fixes or new optional fields. The dashboard compares it with the range it supports.
+const PROTOCOL = 1;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const fileCfg = (() => {
   const file = path.join(HERE, "agent.json");
@@ -707,10 +711,10 @@ async function readJson(req) {
 }
 
 const routes = {
-  "GET /health": async () => ({ ok: true, version: VERSION, platform: "windows", hostname: os.hostname(), fingerprint: FINGERPRINT }),
+  "GET /health": async () => ({ ok: true, version: VERSION, protocol: PROTOCOL, platform: "windows", hostname: os.hostname(), fingerprint: FINGERPRINT }),
   "GET /stats": async () => {
     const [system, nvidia, service] = await Promise.all([systemStats(), nvidiaStats(), serviceStatus()]);
-    return { ts: Date.now() / 1000, version: VERSION, platform: "windows", fingerprint: FINGERPRINT, system, nvidia, service };
+    return { ts: Date.now() / 1000, version: VERSION, protocol: PROTOCOL, platform: "windows", fingerprint: FINGERPRINT, system, nvidia, service };
   },
   "GET /env": async () => readEnvState(),
   "PUT /env": async (req) => putEnv(await readJson(req)),
