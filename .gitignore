@@ -1,0 +1,5 @@
+# build output: .github/scripts/build-setup.ps1 and dotnet
+build/out/
+dist/
+bin/
+obj/

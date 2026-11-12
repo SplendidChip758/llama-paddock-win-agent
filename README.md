@@ -30,21 +30,19 @@
 
 ## llama-paddock Windows agent
 
-The Windows host agent for [llama-paddock](https://github.com/SplendidChip758/llama-paddock), a self-hosted dashboard for a fleet of Ollama hosts. It runs on a Windows PC next to the Ollama desktop app and gives the dashboard what Ollama's own API doesn't: system and GPU stats, Ollama's environment variables, restarting Ollama, its log, and the GPU check.
+The Windows host agent for [llama-paddock](https://github.com/SplendidChip758/llama-paddock), a self-hosted dashboard for a fleet of Ollama hosts. It runs Ollama on a Windows PC and gives the dashboard what Ollama's own API doesn't: system and GPU stats, Ollama's environment variables, restarting Ollama, its log, and the GPU check.
 
-It runs as a Scheduled Task at logon, in your own session, so it can restart the Ollama tray app. It is one file of plain Node.js (18.15+) with no dependencies, and serves the same HTTP API as the [Linux agent](https://github.com/SplendidChip758/llama-paddock-agent) on port 11435, over HTTPS with its own key and, unless turned off, plain HTTP.
+It runs as a Windows service, whether or not anyone is signed in, and runs `ollama serve` itself. It serves the same HTTP API as the [Linux agent](https://github.com/SplendidChip758/llama-paddock-agent) on port 11435, over HTTPS with its own key and, unless turned off, plain HTTP. The agent is one file of plain Node.js (18.15+) with no dependencies; the setup brings its own Node.js.
 
 ## Install
 
-Download `llama-paddock-agent-windows.zip` from the [latest release](https://github.com/SplendidChip758/llama-paddock-win-agent/releases/latest), unzip it, and run the installer from the account that runs Ollama:
+Install Ollama first. Then download `llama-paddock-agent-setup.exe` from the [latest release](https://github.com/SplendidChip758/llama-paddock-win-agent/releases/latest) and run it. The setup asks which Ollama to run and how the dashboard reaches the PC, then shows the agent URL, token and key fingerprint to enter in the dashboard under **Add host**.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
+The setup isn't code-signed yet, so Windows SmartScreen warns about it: choose **More info**, then **Run anyway**. The release's `SHA256SUMS` lists its checksum, which `Get-FileHash llama-paddock-agent-setup.exe` shows.
 
-It needs Node.js 18.15 or newer (`winget install OpenJS.NodeJS.LTS`). The [Windows agent docs](https://github.com/SplendidChip758/llama-paddock/blob/main/docs/agent-windows.md) cover the options, updating, and adding the PC to the dashboard. `uninstall.ps1` removes it.
+An agent installed the earlier way, as a scheduled task, is moved to the service with its token, HTTPS key and Ollama variables, so the dashboard needs no change. Running a newer setup updates the agent; remove it under **Installed apps**. The [Windows agent docs](https://github.com/SplendidChip758/llama-paddock/blob/main/docs/agent-windows.md) cover the details.
 
-Every release has `llama-paddock-agent-windows.zip` and `SHA256SUMS`, which lists the zip and the files in it. Releases up to 0.10.0-dev.1 also have `paddock-agent-windows.mjs`.
+Releases with the setup have `llama-paddock-agent-setup.exe` and `SHA256SUMS`, which lists the setup and the main files it installs. Earlier releases have `llama-paddock-agent-windows.zip` with the scheduled-task installer. That installer is still here as `install.ps1`, for running the agent next to the Ollama tray app instead.
 
 ## Versions and the protocol
 

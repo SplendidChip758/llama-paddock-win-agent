@@ -1,8 +1,9 @@
 # On pushes to main or dev that touch the agent, semantic-release reads the
 # Conventional Commits since the last v* tag and, if any warrant a release:
 # stamps the version into the agent, updates CHANGELOG.md, commits that back
-# to the branch, tags it and creates a GitHub release with the agent, a zip of
-# it with its installer and uninstaller, and SHA256SUMS. Config: .releaserc.json
+# to the branch, tags it and creates a GitHub release. The setup job then
+# builds llama-paddock-agent-setup.exe on Windows from the tag and attaches it
+# with SHA256SUMS. Config: .releaserc.json
 #
 #   main → vX.Y.Z           stable release
 #   dev  → vX.Y.Z-dev.N     GitHub prerelease
@@ -17,8 +18,10 @@ on:
     branches: [main, dev]
     paths:
       - "paddock-agent.mjs"
-      - "install.ps1"
-      - "uninstall.ps1"
+      - "service/**"
+      - "setup/**"
+      - "build/node.json"
+      - ".github/scripts/build-setup.ps1"
       - ".releaserc.json"
       - ".github/workflows/release.yml"
       - ".github/scripts/prepare-release.sh"
@@ -62,6 +65,29 @@ jobs:
           -p @semantic-release/exec@7
           -p conventional-changelog-conventionalcommits@9
           semantic-release
+
+  # The setup needs Windows (dotnet for the service program, Inno Setup), so it
+  # is built here from the release tag and added to the release semantic-release
+  # created. The dashboard skips a release until its SHA256SUMS is there.
+  setup:
+    needs: release
+    if: needs.release.outputs.version != ''
+    runs-on: windows-latest
+    env:
+      TAG: v${{ needs.release.outputs.version }}
+      VERSION: ${{ needs.release.outputs.version }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          ./.github/scripts/build-setup.ps1 -Version $env:VERSION
+          gh release upload $env:TAG dist/llama-paddock-agent-setup.exe dist/SHA256SUMS --clobber
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
   # dev only accepts squash merges, which would drop the tag from dev's history,
   # so the merge is pushed directly with the deploy key (the rulesets' bypass).

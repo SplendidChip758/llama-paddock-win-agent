@@ -24,7 +24,19 @@ node --check paddock-agent.mjs
 bash -n .github/scripts/prepare-release.sh
 ```
 
-CI also parses `install.ps1` and `uninstall.ps1` with PowerShell and starts the agent on a Windows runner.
+### The service and the setup
+
+The service program in `service/` is C# for .NET Framework 4.8; open `service/PaddockAgentService.csproj` in Visual Studio, or build it with the .NET SDK. Service mode can be tested without installing anything, against a stub `ollama.exe`:
+
+```powershell
+dotnet build service -c Release
+dotnet build test/fake-ollama -c Release -o $env:TEMP\fake-ollama
+.\test\service-mode.ps1 -FakeOllama $env:TEMP\fake-ollama\ollama.exe
+```
+
+`.github/scripts/build-setup.ps1` builds `dist\llama-paddock-agent-setup.exe`; it needs Inno Setup 6 (`winget install JRSoftware.InnoSetup`). `test\service.ps1` installs that setup over a faked scheduled-task install, upgrades and uninstalls it. It changes the machine, so CI runs it on its throwaway runner; run it yourself only on a test PC or VM.
+
+CI parses the PowerShell scripts, starts the agent, runs both tests and builds the setup on a Windows runner.
 
 ### Testing with the dashboard
 
@@ -49,4 +61,6 @@ Branch from `dev` and open the PR against `dev`; it is squash-merged, so its tit
 
 ## How a release happens
 
-On a push to `main` or `dev` that changes the agent or its installer, the release workflow runs semantic-release (`.releaserc.json`). It stamps the version into the agent, updates `CHANGELOG.md`, tags the commit and publishes a GitHub release with `llama-paddock-agent-windows.zip` (the agent, `install.ps1` and `uninstall.ps1`) and `SHA256SUMS`, which lists the zip and the files in it.
+On a push to `main` or `dev` that changes the agent, the service program or the setup, the release workflow runs semantic-release (`.releaserc.json`). It stamps the version into the agent, updates `CHANGELOG.md`, tags the commit and publishes a GitHub release. A Windows job then builds `llama-paddock-agent-setup.exe` from the tag, with the Node.js pinned in `build/node.json`, and attaches it with `SHA256SUMS`, which lists the setup and the main files in it.
+
+To move to a newer Node.js, change the version and both checksums in `build/node.json`: `node_exe_sha256` from the release's `SHASUMS256.txt` (`win-x64/node.exe`), and `license_sha256` of `LICENSE` at that tag.

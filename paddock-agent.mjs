@@ -2,8 +2,15 @@
 /**
  * llama-paddock agent — Windows
  * =============================
- * Runs in the user's session (Scheduled Task at logon) next to the Ollama
- * desktop app. Zero npm dependencies: needs Node.js >= 18.15.
+ * Runs in one of two modes. Zero npm dependencies: needs Node.js >= 18.15.
+ *
+ *   service  The setup's Windows service (paddock-agent-service.exe) starts it with
+ *            PADDOCK_AGENT_MODE=service and PADDOCK_AGENT_DATA=%ProgramData%\llama-paddock-agent.
+ *            It runs `ollama serve` itself, restarts it when it exits, and keeps its output in
+ *            logs\server.log in the data folder. Ollama's variables live in ollama-env.json there.
+ *            Closing stdin stops Ollama and the agent: that's how the service stops it.
+ *   task     (legacy) A Scheduled Task at logon in the user's session, next to the Ollama
+ *            desktop app, whose user environment variables it edits.
  *
  * Same HTTP API as the Linux agent:
  *   GET  /health            no auth
@@ -18,22 +25,24 @@
  *   GET  /requests?since=T  Ollama's request log lines after T (unix seconds)
  * The port serves HTTPS with the agent's own key, and plain HTTP unless PADDOCK_AGENT_HTTP=off.
  *
- * Why user variables: Ollama for Windows reads the account's environment
+ * Why user variables in task mode: Ollama for Windows reads the account's environment
  * variables, and is a tray app running in the user's session.
  *
  * Only variables matching MANAGED_RE (OLLAMA_*, CUDA_*, ...) or ones added
  * through the dashboard are ever shown — never Path, TEMP, etc. — and only
  * those in ENV_ALLOW can be changed.
  *
- * Settings come from agent.json next to this file, overridden by environment
- * variables of the same name:
+ * Settings come from agent.json in the data folder (PADDOCK_AGENT_DATA, default: next to
+ * this file), overridden by environment variables of the same name:
  *   PADDOCK_AGENT_TOKEN   required shared secret
  *   PADDOCK_AGENT_BIND    default 0.0.0.0
  *   PADDOCK_AGENT_PORT    default 11435
  *   PADDOCK_AGENT_HTTP    "off" = HTTPS only (default on, so dashboards from before 0.7.0 keep working)
- *   PADDOCK_AGENT_TLS_KEY  default agent.key next to this file, created on first start
- *   PADDOCK_AGENT_TLS_CERT default agent.crt next to this file, self-signed from the key when missing
- *   PADDOCK_OLLAMA_APP    default %LOCALAPPDATA%\Programs\Ollama\ollama app.exe
+ *   PADDOCK_AGENT_TLS_KEY  default agent.key in the data folder, created on first start
+ *   PADDOCK_AGENT_TLS_CERT default agent.crt in the data folder, self-signed from the key when missing
+ *   PADDOCK_OLLAMA_APP    task mode: default %LOCALAPPDATA%\Programs\Ollama\ollama app.exe
+ *   PADDOCK_OLLAMA_EXE    service mode: the ollama.exe to run (the setup writes it); default
+ *                         ollama.exe next to PADDOCK_OLLAMA_APP
  *   PADDOCK_DISK_PATHS    extra drives/folders to report, comma separated
  *   PADDOCK_AGENT_ENV_ALLOW extra variable names the dashboard may set, comma separated
  *                         (a trailing * allows a prefix: "HSA_*,MY_VAR"); see ENV_ALLOW
@@ -55,8 +64,10 @@ const VERSION = "0.10.0-dev.1";
 // never for fixes or new optional fields. The dashboard compares it with the range it supports.
 const PROTOCOL = 1;
 const HERE = path.dirname(fileURLToPath(import.meta.url));
+// the service keeps the token, key and state in %ProgramData%; the program folder is read-only to it
+const DATA = process.env.PADDOCK_AGENT_DATA || HERE;
 const fileCfg = (() => {
-  const file = path.join(HERE, "agent.json");
+  const file = path.join(DATA, "agent.json");
   let text;
   try {
     text = fs.readFileSync(file, "utf8");
@@ -75,11 +86,16 @@ const cfg = (k, d = "") => process.env[k] ?? fileCfg[k] ?? d;
 
 const LOCALAPPDATA = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
 const TOKEN = String(cfg("PADDOCK_AGENT_TOKEN"));
+const SERVICE = String(cfg("PADDOCK_AGENT_MODE")).toLowerCase() === "service";
+const MODE = SERVICE ? "service" : "task";
 const OLLAMA_APP = String(cfg("PADDOCK_OLLAMA_APP", path.join(LOCALAPPDATA, "Programs", "Ollama", "ollama app.exe")));
-const LOG_FILE = path.join(LOCALAPPDATA, "Ollama", "server.log");
-const STATE_FILE = path.join(HERE, "agent-state.json");
-const TLS_KEY = String(cfg("PADDOCK_AGENT_TLS_KEY", path.join(HERE, "agent.key")));
-const TLS_CERT = String(cfg("PADDOCK_AGENT_TLS_CERT", path.join(HERE, "agent.crt")));
+const OLLAMA_EXE = String(cfg("PADDOCK_OLLAMA_EXE", path.join(path.dirname(OLLAMA_APP), "ollama.exe")));
+// the service writes Ollama's output itself, one file per run like the desktop app's server.log
+const LOG_FILE = SERVICE ? path.join(DATA, "logs", "server.log") : path.join(LOCALAPPDATA, "Ollama", "server.log");
+const ENV_FILE = path.join(DATA, "ollama-env.json");
+const STATE_FILE = path.join(DATA, "agent-state.json");
+const TLS_KEY = String(cfg("PADDOCK_AGENT_TLS_KEY", path.join(DATA, "agent.key")));
+const TLS_CERT = String(cfg("PADDOCK_AGENT_TLS_CERT", path.join(DATA, "agent.crt")));
 const HTTP_ON = String(cfg("PADDOCK_AGENT_HTTP", "on")).toLowerCase() !== "off";
 const DRY_RUN = String(cfg("PADDOCK_DRY_RUN")) === "1";
 const EXTRA_DISKS = String(cfg("PADDOCK_DISK_PATHS")).split(",").map((s) => s.trim()).filter(Boolean);
@@ -189,8 +205,9 @@ async function ollamaProcesses() {
     pids.push(Number(cols[1]));
     rss += Number((cols[4] || "0").replace(/[^\d]/g, "")) * 1024; // "123,456 K"
   }
-  // the server is the oldest process; tasklist lists in creation order
-  return { pid: pids[0], rss_total: rss, runners: Math.max(0, rows.length - 1) };
+  // the server is the oldest process; tasklist lists in creation order. The service knows its own.
+  const server = SERVICE && supervised.child ? supervised.child.pid : pids[0];
+  return { pid: server, rss_total: rss, runners: Math.max(0, rows.length - 1) };
 }
 
 let modelsDirCache = null;
@@ -261,14 +278,47 @@ async function nvidiaStats() {
 }
 
 // ------------------------------------------------------------------ environment
-/** Read user + machine scope variables in one PowerShell call. */
+/** Ollama's variables in service mode: a service account's user variables aren't anyone's to edit. */
+function readEnvFile() {
+  let text;
+  try {
+    text = fs.readFileSync(ENV_FILE, "utf8");
+  } catch (e) {
+    if (e.code === "ENOENT") return {};
+    throw httpError(500, `can't read ${ENV_FILE}: ${e.message}`);
+  }
+  try {
+    const vars = JSON.parse(text.replace(/^﻿/, ""));
+    return Object.fromEntries(Object.entries(vars).filter(([k, v]) => KEY_RE.test(k) && typeof v === "string"));
+  } catch (e) {
+    throw httpError(500, `${ENV_FILE} is not valid JSON: ${e.message}`);
+  }
+}
+
+/** Apply {name: value | null} to the file; written next to it first, so a crash can't leave half a file. */
+function writeEnvFile(changes) {
+  const vars = readEnvFile();
+  for (const [k, v] of Object.entries(changes)) {
+    for (const e of Object.keys(vars)) if (e.toLowerCase() === k.toLowerCase()) delete vars[e];
+    if (v !== null) vars[k] = v;
+  }
+  const tmp = `${ENV_FILE}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(vars, null, 2));
+  fs.renameSync(tmp, ENV_FILE);
+}
+
+/**
+ * The agent's own scope (the user's variables, or ollama-env.json in service mode) and the
+ * machine's. Machine variables are read in one PowerShell call.
+ */
 async function readScopes() {
-  const out = await powershell(`
+  const out = await powershell(SERVICE ? `
+@{ machine = [Environment]::GetEnvironmentVariables('Machine') } | ConvertTo-Json -Compress -Depth 3` : `
 $u = [Environment]::GetEnvironmentVariables('User')
 $m = [Environment]::GetEnvironmentVariables('Machine')
 @{ user = $u; machine = $m } | ConvertTo-Json -Compress -Depth 3`);
   const parsed = JSON.parse(out || "{}");
-  return { user: parsed.user || {}, machine: parsed.machine || {} };
+  return { user: SERVICE ? readEnvFile() : parsed.user || {}, machine: parsed.machine || {} };
 }
 
 function isManaged(key, customKeys) {
@@ -284,8 +334,9 @@ async function readEnvState() {
   if (managed.OLLAMA_MODELS || machineManaged.OLLAMA_MODELS) modelsDirCache = managed.OLLAMA_MODELS || machineManaged.OLLAMA_MODELS;
   return {
     platform: "windows",
+    mode: MODE,
     managed,
-    override_path: "HKCU\\Environment",
+    override_path: SERVICE ? ENV_FILE : "HKCU\\Environment",
     raw: Object.entries(managed).map(([k, v]) => `${k}=${v}`).join("\n"),
     effective: { ...machineManaged, ...managed },
     external,
@@ -319,11 +370,15 @@ async function putEnv(body) {
     ...Object.keys(before.managed).filter((k) => !envAllowed(k) && !MANAGED_RE.test(k)),
   ])];
 
-  // SetEnvironmentVariable(User) writes HKCU\Environment and broadcasts WM_SETTINGCHANGE
-  await powershell(`
+  if (SERVICE) {
+    writeEnvFile(changes);
+  } else {
+    // SetEnvironmentVariable(User) writes HKCU\Environment and broadcasts WM_SETTINGCHANGE
+    await powershell(`
 foreach ($p in $data.PSObject.Properties) {
   [Environment]::SetEnvironmentVariable($p.Name, $p.Value, 'User')
 }`, changes);
+  }
   saveState(state);
 
   const after = await readEnvState();
@@ -365,8 +420,98 @@ async function waitForApi(env, timeoutMs) {
   return false;
 }
 
+// ------------------------------------------------------------------ service mode: Ollama supervisor
+// The service runs `ollama serve` as the agent's child and starts it again when it exits, waiting
+// longer each time it fails quickly. The service's job object stops Ollama and its runners if the
+// agent itself dies.
+const SERVER_LOGS_KEPT = 5;
+const supervised = { child: null, since: null, stopping: false, failures: 0, timer: null };
+
+/** server.log → server-1.log …, so server.log is always the current run, like the desktop app's. */
+function rotateServerLog() {
+  fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true });
+  const name = (i) => (i === 0 ? LOG_FILE : LOG_FILE.replace(/\.log$/, `-${i}.log`));
+  for (let i = SERVER_LOGS_KEPT - 1; i >= 0; i--) {
+    try { fs.renameSync(name(i), name(i + 1)); } catch { /* not there yet */ }
+  }
+}
+
+async function startSupervised() {
+  if (DRY_RUN || supervised.child) return;
+  supervised.stopping = false;
+  const env = await freshEnv();
+  rotateServerLog();
+  const out = fs.openSync(LOG_FILE, "a");
+  let child;
+  try {
+    child = spawn(OLLAMA_EXE, ["serve"], { env, windowsHide: true, stdio: ["ignore", out, out] });
+  } finally {
+    // the child has its own handle
+    fs.closeSync(out);
+  }
+  supervised.child = child;
+  supervised.since = Date.now() / 1000;
+  console.log(`started ${OLLAMA_EXE} serve (pid ${child.pid})`);
+  const started = Date.now();
+  const ended = (why) => {
+    if (supervised.child !== child) return;
+    supervised.child = null;
+    supervised.since = null;
+    if (supervised.stopping) return;
+    // a run that lasted a minute was fine: start again right away
+    supervised.failures = Date.now() - started > 60_000 ? 0 : supervised.failures + 1;
+    const delay = Math.min(30_000, 1000 * 2 ** Math.max(0, supervised.failures - 1));
+    const last = tailFile(LOG_FILE, 1)[0] ?? "";
+    console.error(`ollama serve ${why}; starting it again in ${delay / 1000}s. Its last line: ${last}`);
+    supervised.timer = setTimeout(async () => {
+      supervised.timer = null;
+      if (child.pid) await killOrphanRunners(child.pid);
+      startSupervised().catch((e) => console.error(`starting ollama: ${e.message}`));
+    }, delay);
+  };
+  child.on("error", (e) => ended(`could not start (${e.message})`));
+  child.on("exit", (code) => ended(`exited with code ${code}`));
+}
+
+/**
+ * Model runners whose Ollama died: they keep their VRAM, and with the parent gone taskkill /T can't
+ * reach them. An orphan keeps its parent's pid, so the name and that pid find them.
+ */
+async function killOrphanRunners(parentPid) {
+  try {
+    await powershell(`
+Get-CimInstance Win32_Process -Filter "ParentProcessId = $($data.pid) AND (Name = 'ollama.exe' OR Name = 'llama-server.exe')" |
+  ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`, { pid: Number(parentPid) });
+  } catch (e) {
+    console.error(`stopping the runners of the last Ollama: ${e.message}`);
+  }
+}
+
+async function stopSupervised() {
+  supervised.stopping = true;
+  if (supervised.timer) clearTimeout(supervised.timer);
+  supervised.timer = null;
+  const child = supervised.child;
+  if (!child) return;
+  const exited = new Promise((r) => child.once("exit", r));
+  // /T: the model runners are Ollama's children, and child.kill() would leave them running
+  await run("taskkill", ["/PID", String(child.pid), "/T", "/F"], 10_000);
+  await Promise.race([exited, sleep(10_000)]);
+  supervised.child = null;
+  supervised.since = null;
+}
+
+async function restartSupervised() {
+  await stopSupervised();
+  supervised.failures = 0;
+  await startSupervised();
+  const ok = await waitForApi(await freshEnv(), 30_000);
+  return { ok, launched: `${OLLAMA_EXE} serve`, stderr: ok ? "" : "Ollama did not answer on its API within 30s" };
+}
+
 async function restartOllama() {
   if (DRY_RUN) return { ok: true, dry_run: true };
+  if (SERVICE) return restartSupervised();
   await run("taskkill", ["/IM", "ollama app.exe", "/F"], 10_000);
   await run("taskkill", ["/IM", "ollama.exe", "/F", "/T"], 10_000);
   for (let i = 0; i < 20 && (await ollamaRunning()); i++) await sleep(500);
@@ -393,6 +538,10 @@ async function restartOllama() {
 }
 
 async function serviceStatus() {
+  if (SERVICE) {
+    const c = supervised.child;
+    return { active: c ? "active" : "inactive", sub: c ? "running" : "stopped", since: supervised.since, main_pid: c?.pid ?? null };
+  }
   const proc = await ollamaProcesses();
   return { active: proc ? "active" : "inactive", sub: proc ? "running" : "stopped", since: null, main_pid: proc?.pid ?? null };
 }
@@ -711,10 +860,10 @@ async function readJson(req) {
 }
 
 const routes = {
-  "GET /health": async () => ({ ok: true, version: VERSION, protocol: PROTOCOL, platform: "windows", hostname: os.hostname(), fingerprint: FINGERPRINT }),
+  "GET /health": async () => ({ ok: true, version: VERSION, protocol: PROTOCOL, platform: "windows", mode: MODE, hostname: os.hostname(), fingerprint: FINGERPRINT }),
   "GET /stats": async () => {
     const [system, nvidia, service] = await Promise.all([systemStats(), nvidiaStats(), serviceStatus()]);
-    return { ts: Date.now() / 1000, version: VERSION, protocol: PROTOCOL, platform: "windows", fingerprint: FINGERPRINT, system, nvidia, service };
+    return { ts: Date.now() / 1000, version: VERSION, protocol: PROTOCOL, platform: "windows", mode: MODE, fingerprint: FINGERPRINT, system, nvidia, service };
   },
   "GET /env": async () => readEnvState(),
   "PUT /env": async (req) => putEnv(await readJson(req)),
@@ -763,4 +912,15 @@ if (!TOKEN) {
 }
 const port = Number(cfg("PADDOCK_AGENT_PORT", "11435"));
 const bind = String(cfg("PADDOCK_AGENT_BIND", "0.0.0.0"));
-const FINGERPRINT = listenBoth(onRequest, port, bind, `llama-paddock agent ${VERSION} (windows)`);
+const FINGERPRINT = listenBoth(onRequest, port, bind, `llama-paddock agent ${VERSION} (windows, ${MODE})`);
+
+if (SERVICE) {
+  startSupervised().catch((e) => console.error(`starting ollama: ${e.message}`));
+  // the service closes stdin to stop the agent; Ctrl+C when run by hand
+  const shutdown = async () => {
+    await stopSupervised();
+    process.exit(0);
+  };
+  process.stdin.on("end", shutdown).resume();
+  process.on("SIGINT", shutdown);
+}
