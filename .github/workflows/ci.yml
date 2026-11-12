@@ -69,6 +69,9 @@ jobs:
           dotnet build service -c Release -nologo
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           dotnet build test/fake-ollama -c Release -o "$env:RUNNER_TEMP\fake-ollama" -nologo
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          # newer Ollama runs models as llama-server.exe; the stub starts this copy as its runner
+          Copy-Item "$env:RUNNER_TEMP\fake-ollama\ollama.exe" "$env:RUNNER_TEMP\fake-ollama\llama-server.exe"
 
       # the agent's service mode without the service, on the oldest Node it supports
       - name: Service mode
@@ -80,6 +83,15 @@ jobs:
         run: |
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
           ./.github/scripts/build-setup.ps1 -Version 0.0.0-ci
+
+      # the setup from this run, to try it on a real PC: the run's Artifacts section
+      - uses: actions/upload-artifact@v7
+        with:
+          name: llama-paddock-agent-setup
+          path: |
+            dist/llama-paddock-agent-setup.exe
+            dist/SHA256SUMS
+          retention-days: 14
 
       # installs the service on the runner over a faked scheduled-task install, upgrades it, uninstalls it
       - name: Setup installs, upgrades and uninstalls

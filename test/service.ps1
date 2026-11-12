@@ -34,7 +34,12 @@ function Api($path, $method = "Get", $body = $null) {
   if ($body) { $p.Body = ($body | ConvertTo-Json -Depth 5); $p.ContentType = "application/json" }
   Invoke-RestMethod @p
 }
-function Fakes { @(Get-CimInstance Win32_Process -Filter "Name = 'ollama.exe'" | Where-Object { $_.ExecutablePath -eq $FakeOllama }) }
+# the stub's server and its runner: ollama.exe, and llama-server.exe when a copy has that name
+function Fakes {
+  $dir = Split-Path $FakeOllama
+  @(Get-CimInstance Win32_Process -Filter "Name = 'ollama.exe' OR Name = 'llama-server.exe'" | Where-Object { $_.ExecutablePath -and (Split-Path $_.ExecutablePath) -eq $dir })
+}
+function LlamaServers { @(Fakes | Where-Object { $_.Name -eq "llama-server.exe" }) }
 function RunSetup {
   $log = Join-Path $env:RUNNER_TEMP "setup-$([Guid]::NewGuid().ToString('N').Substring(0, 6)).log"
   $p = Start-Process $Setup -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/OLLAMAEXE=`"$FakeOllama`"", "/LOG=`"$log`"" -Wait -PassThru
@@ -74,6 +79,8 @@ $envState = Api "/env"
 Check "Ollama variables moved over" ($envState.managed.OLLAMA_KEEP_ALIVE -eq "7m") ($envState.managed | ConvertTo-Json -Compress)
 Check "models folder kept" ($envState.managed.OLLAMA_MODELS -like "*\.ollama\models") $envState.managed.OLLAMA_MODELS
 Check "Ollama runs under the service" (Until 30 { (Api "/stats").service.active -eq "active" })
+Check "its runner runs as llama-server.exe" (Until 15 { @(LlamaServers).Count -eq 1 }) ("llama-server.exe: " + @(LlamaServers).Count)
+Check "/stats counts the runner" ((Api "/stats").system.ollama_process.runners -eq 1) ((Api "/stats").system.ollama_process | ConvertTo-Json -Compress)
 Check "server.log readable through the agent" (Until 15 { (Api "/logs").lines -match "inference compute" })
 $acl = Get-Acl $data
 Check "data folder doesn't inherit" ($acl.AreAccessRulesProtected)
@@ -89,14 +96,14 @@ Check "with a new pid" ((Api "/stats").service.main_pid -ne $pid1)
 Check "Ollama gets the new value" (Until 15 { (Api "/logs").lines -match "OLLAMA_KEEP_ALIVE=9m" })
 
 Stop-Service $svc
-Check "stopping leaves no Ollama" (Until 10 { (Fakes).Count -eq 0 }) ("left: " + (Fakes).Count)
+Check "stopping leaves no Ollama or llama-server" (Until 10 { @(Fakes).Count -eq 0 }) ("left: " + (@(Fakes).Name -join ", "))
 Check "stopping leaves no Node" (-not (Get-Process node -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq (Join-Path $prog "node.exe") }))
 Start-Service $svc
 Check "starts again" (Until 30 { (Health).ok })
 
 Get-Process node | Where-Object { $_.Path -eq (Join-Path $prog "node.exe") } | Stop-Process -Force
 Check "recovers after the agent dies" (Until 60 { (Get-Service $svc).Status -eq "Running" -and (Health).ok })
-Check "with one Ollama" (Until 30 { (Fakes).Count -eq 2 }) ("ollama.exe: " + (Fakes).Count)
+Check "with one Ollama and one runner" (Until 30 { @(Fakes).Count -eq 2 -and @(LlamaServers).Count -eq 1 }) ("processes: " + (@(Fakes).Name -join ", "))
 
 # --- upgrade ----------------------------------------------------------------------
 Write-Host "==> setup again (upgrade)"
@@ -113,7 +120,7 @@ Check "service removed" (Until 60 { -not (Get-Service $svc -ErrorAction Silently
 Check "program folder removed" (Until 60 { -not (Test-Path $prog) })
 Check "data folder removed" (-not (Test-Path $data))
 Check "firewall rule removed" (-not (Get-NetFirewallRule -DisplayName "llama-paddock agent" -ErrorAction SilentlyContinue))
-Check "no Ollama left" ((Fakes).Count -eq 0)
+Check "no Ollama or llama-server left" (@(Fakes).Count -eq 0) ("left: " + (@(Fakes).Name -join ", "))
 Check "Ollama's folder no longer grants the service" (-not ((Get-Acl (Split-Path $FakeOllama)).Access | Where-Object { $_.IdentityReference -like "NT SERVICE\$svc" }))
 
 [Environment]::SetEnvironmentVariable("OLLAMA_KEEP_ALIVE", $null, "User")

@@ -8,7 +8,8 @@ using System.Threading;
 
 // `ollama serve` for tests: answers GET /api/version on OLLAMA_HOST, writes the log lines the agent
 // reads (GPU discovery, a model runner start, a [GIN] line per request, OLLAMA_KEEP_ALIVE so the test
-// can tell which environment it got) and starts one `ollama runner` child, as Ollama does for a model.
+// can tell which environment it got) and starts one model runner child, as Ollama does for a model:
+// llama-server.exe when a copy of this stub has that name next to it, else `ollama runner`.
 static class Program
 {
     static int Main(string[] args)
@@ -37,7 +38,10 @@ static class Program
         Log($"msg=\"Listening on {host} (version 0.0.0-fake)\"");
         Log($"msg=\"server config\" OLLAMA_KEEP_ALIVE={Environment.GetEnvironmentVariable("OLLAMA_KEEP_ALIVE") ?? ""}");
         Log("msg=\"inference compute\" id=GPU-00000000 library=cuda compute=8.9 name=CUDA0 description=\"Fake GPU\" total=\"24.0 GiB\"");
-        Process.Start(new ProcessStartInfo(Process.GetCurrentProcess().MainModule.FileName, "runner") { UseShellExecute = false, CreateNoWindow = true });
+        // newer Ollama runs models as llama-server.exe: a copy of this stub under that name stands in for it
+        string self = Process.GetCurrentProcess().MainModule.FileName;
+        string llamaServer = Path.Combine(Path.GetDirectoryName(self), "llama-server.exe");
+        Process.Start(new ProcessStartInfo(File.Exists(llamaServer) ? llamaServer : self, "runner") { UseShellExecute = false, CreateNoWindow = true });
         Log("msg=\"llama runner started in 1.25 seconds\"");
 
         while (true)

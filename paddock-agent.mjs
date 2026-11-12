@@ -193,21 +193,26 @@ function diskUsage(p) {
   } catch { return null; }
 }
 
-/** ollama.exe processes (server + runners) via tasklist CSV. */
-async function ollamaProcesses() {
-  const r = await run("tasklist", ["/FO", "CSV", "/NH", "/FI", "IMAGENAME eq ollama.exe"], 5000);
-  const rows = r.stdout.split(/\r?\n/).filter((l) => l.startsWith('"ollama.exe"'));
-  if (!rows.length) return null;
-  let rss = 0;
-  const pids = [];
-  for (const row of rows) {
+/** Processes of one image name from tasklist's CSV: [{pid, rss}] in creation order. */
+async function processesNamed(image) {
+  const r = await run("tasklist", ["/FO", "CSV", "/NH", "/FI", `IMAGENAME eq ${image}`], 5000);
+  return r.stdout.split(/\r?\n/).filter((l) => l.toLowerCase().startsWith(`"${image}"`)).map((row) => {
     const cols = row.match(/"([^"]*)"/g)?.map((c) => c.slice(1, -1)) ?? [];
-    pids.push(Number(cols[1]));
-    rss += Number((cols[4] || "0").replace(/[^\d]/g, "")) * 1024; // "123,456 K"
-  }
-  // the server is the oldest process; tasklist lists in creation order. The service knows its own.
-  const server = SERVICE && supervised.child ? supervised.child.pid : pids[0];
-  return { pid: server, rss_total: rss, runners: Math.max(0, rows.length - 1) };
+    return { pid: Number(cols[1]), rss: Number((cols[4] || "0").replace(/[^\d]/g, "")) * 1024 }; // "123,456 K"
+  });
+}
+
+/**
+ * Ollama's server and its model runners. Older Ollama ran each model as another ollama.exe; newer
+ * versions run them as llama-server.exe, so both count.
+ */
+async function ollamaProcesses() {
+  const [servers, llamaServers] = await Promise.all([processesNamed("ollama.exe"), processesNamed("llama-server.exe")]);
+  if (!servers.length) return null;
+  const rss = [...servers, ...llamaServers].reduce((sum, p) => sum + p.rss, 0);
+  // the server is the oldest ollama.exe; tasklist lists in creation order. The service knows its own.
+  const server = SERVICE && supervised.child ? supervised.child.pid : servers[0].pid;
+  return { pid: server, rss_total: rss, runners: servers.length - 1 + llamaServers.length };
 }
 
 let modelsDirCache = null;
