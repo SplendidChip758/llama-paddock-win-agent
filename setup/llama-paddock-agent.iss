@@ -9,6 +9,11 @@
 ;   unins000.exe /VERYSILENT [/KEEPDATA=1]
 ; A silent install that couldn't start the agent exits with code 1; the reason is in the setup log (/LOG=<file>).
 
+; ExecAndLogOutput passes the installer's progress to the wizard
+#if Ver < EncodeVer(6, 3, 0)
+  #error Inno Setup 6.3 or newer is needed
+#endif
+
 #ifndef AppVersion
   #define AppVersion "0.0.0"
 #endif
@@ -69,6 +74,13 @@ var
 begin
   DeleteFile(ResultFile);
   Result := Exec(Dir + '\{#Svc}', Args + ' --result ' + AddQuotes(ResultFile), '', SW_HIDE, ewWaitUntilTerminated, Code) and (Code = 0);
+end;
+
+// `step: …` lines from the installer become the wizard's status; everything goes to the setup log
+procedure OnInstallerOutput(const S: String; const Error, FirstLine: Boolean);
+begin
+  Log('installer: ' + S);
+  if Copy(S, 1, 6) = 'step: ' then WizardForm.StatusLabel.Caption := Copy(S, 7, Length(S));
 end;
 
 function Res(Key: String; FileName: String): String;
@@ -165,29 +177,40 @@ end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Args, F: String;
+  Args, F, Url, Others: String;
+  Code: Integer;
 begin
   if CurStep <> ssPostInstall then Exit;
-  WizardForm.StatusLabel.Caption := 'Starting the agent...';
+  WizardForm.StatusLabel.Caption := 'Setting up the agent...';
   F := ExpandConstant('{tmp}\install.ini');
   Args := 'install --ollama-exe ' + AddQuotes(OllamaPage.Values[0]);
   if not Installed and (Legacy = '') then begin
     Args := Args + ' --port ' + Trim(NetworkPage.Values[0]) + ' --allow-from ' + AddQuotes(Trim(NetworkPage.Values[1]));
     if not FirewallBox.Checked then Args := Args + ' --no-firewall';
   end;
-  InstallOk := Svc(Args, F, ExpandConstant('{app}'));
+  DeleteFile(F);
+  InstallOk := ExecAndLogOutput(ExpandConstant('{app}\{#Svc}'), Args + ' --result ' + AddQuotes(F), '', SW_HIDE,
+    ewWaitUntilTerminated, Code, @OnInstallerOutput) and (Code = 0);
   if InstallOk then begin
     ResultPage.Description := 'The agent is running.';
+    Url := Res('url', F);
+    Others := Res('addresses', F);
+    // the first address is in the URL; the others are worth knowing on a PC with several networks
+    if Pos(' | ', Others) > 0 then
+      Others := #13#10 + '(This PC''s other addresses: ' + Copy(Others, Pos(' | ', Others) + 3, Length(Others)) + ')'
+    else
+      Others := '';
     if Res('token', F) <> '' then
       ResultPage.RichEditViewer.Text :=
         'In the dashboard, choose Add host and enter:' + #13#10#13#10 +
-        'Agent URL:  https://<this PC''s address>:' + Res('port', F) + #13#10 +
+        'Agent URL:  ' + Url + Others + #13#10 +
         'Agent token:  ' + Res('token', F) + #13#10 +
         'Key fingerprint:  ' + Res('fingerprint', F) + #13#10#13#10 +
         'Copy them from here: the token isn''t shown again. It is stored in ' + ExpandConstant('{commonappdata}') + '\llama-paddock-agent\agent.json, which only administrators can read.'
     else
       ResultPage.RichEditViewer.Text :=
         'The token and the HTTPS key were kept, so there is nothing to change in the dashboard.' + #13#10#13#10 +
+        'Agent URL:  ' + Url + Others + #13#10 +
         'Key fingerprint:  ' + Res('fingerprint', F);
   end else begin
     InstallError := Res('error', F);

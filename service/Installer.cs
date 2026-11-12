@@ -6,6 +6,8 @@ using System.IO;
 using System.Linq;
 using System.Management;
 using System.Net;
+using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Security.AccessControl;
 using System.Security.Cryptography;
 using System.Security.Principal;
@@ -135,7 +137,9 @@ namespace LlamaPaddock.Agent
             if (ollamaExe == null) ollamaExe = FindOllama(user);
             if (ollamaExe == null || !File.Exists(ollamaExe)) throw new InvalidOperationException("Ollama isn't installed: install it from https://ollama.com first, or choose its ollama.exe");
 
+            Step("Stopping the running agent");
             StopService();
+            Step("Registering the Windows service");
             CreateOrUpdateService();
             Win.MakePrivate(DataDir, ServiceAccount);
             Directory.CreateDirectory(Path.Combine(DataDir, "logs"));
@@ -143,6 +147,7 @@ namespace LlamaPaddock.Agent
             // the legacy agent holds the port: switch its task off (it would restart the agent), but keep
             // it until the service answers, so a failed install can put it back
             bool hadTask = TaskExists();
+            if (hadTask || legacy != null) Step("Stopping the agent's scheduled task");
             if (hadTask) { Win.Run("schtasks.exe", "/End", "/TN", TaskName); Win.Run("schtasks.exe", "/Change", "/TN", TaskName, "/DISABLE"); }
             StopLegacyAgent();
 
@@ -155,6 +160,7 @@ namespace LlamaPaddock.Agent
             }
             else if (legacy != null)
             {
+                Step("Moving the token, HTTPS key and settings over");
                 foreach (string f in LegacyFiles)
                 {
                     string src = Path.Combine(legacy, f);
@@ -180,6 +186,7 @@ namespace LlamaPaddock.Agent
                 };
             }
             cfg["PADDOCK_OLLAMA_EXE"] = ollamaExe;
+            Step("Writing the agent's settings");
             Win.WriteJson(agentJson, cfg);
 
             string envFile = Path.Combine(DataDir, "ollama-env.json");
@@ -205,10 +212,12 @@ namespace LlamaPaddock.Agent
             }
 
             // the desktop app would start its own Ollama at sign-in and take port 11434 from the service
+            Step("Stopping the Ollama tray app");
             Kill("ollama app");
             Kill("ollama");
             if (user != null) DisableStartupShortcut(user, state);
 
+            Step("Giving the service access to Ollama and its models");
             var grants = state.TryGetValue("grants", out object g) ? ((ArrayList)g).Cast<string>().ToList() : new List<string>();
             void grant(string dir, FileSystemRights rights)
             {
@@ -238,11 +247,14 @@ namespace LlamaPaddock.Agent
             Win.WriteJson(Path.Combine(DataDir, "install-state.json"), state);
 
             int agentPort = int.TryParse(cfg.TryGetValue("PADDOCK_AGENT_PORT", out object p) ? p as string : null, out int n) ? n : 11435;
+            if (!opts.ContainsKey("no-firewall")) Step("Adding the firewall rule");
             if (!opts.ContainsKey("no-firewall")) Firewall(agentPort, opts.TryGetValue("allow-from", out string allow) ? allow : null, upgrade || legacy != null, warnings);
 
             try
             {
+                Step("Starting the agent");
                 StartService();
+                Step("Waiting for the agent to answer");
                 var health = WaitForHealth(agentPort);
                 result["fingerprint"] = health.TryGetValue("fingerprint", out object fp) ? fp : null;
                 result["version"] = health.TryGetValue("version", out object v) ? v : null;
@@ -273,9 +285,30 @@ namespace LlamaPaddock.Agent
             result["migrated"] = legacy != null;
             result["upgraded"] = upgrade;
             result["port"] = agentPort;
-            result["url"] = $"https://{Dns.GetHostName()}:{agentPort}";
+            var addresses = LanAddresses();
+            result["addresses"] = addresses.ToArray();
+            result["hostname"] = Dns.GetHostName();
+            result["url"] = $"https://{addresses.FirstOrDefault() ?? Dns.GetHostName()}:{agentPort}";
             if (token != null) result["token"] = token;
         }
+
+        /// <summary>A line the setup shows as its status while this runs.</summary>
+        static void Step(string text) => Console.WriteLine("step: " + text + "...");
+
+        /// <summary>
+        /// The IPv4 addresses the dashboard can reach this PC on: connected adapters with a gateway, which
+        /// leaves out loopback and the virtual switches of WSL and Hyper-V.
+        /// </summary>
+        static List<string> LanAddresses() =>
+            NetworkInterface.GetAllNetworkInterfaces()
+                .Where(n => n.OperationalStatus == OperationalStatus.Up && n.NetworkInterfaceType != NetworkInterfaceType.Loopback)
+                .Select(n => n.GetIPProperties())
+                .Where(ip => ip.GatewayAddresses.Any(g => g.Address.AddressFamily == AddressFamily.InterNetwork && !g.Address.Equals(IPAddress.Any)))
+                .SelectMany(ip => ip.UnicastAddresses)
+                .Where(a => a.Address.AddressFamily == AddressFamily.InterNetwork && !a.Address.ToString().StartsWith("169.254."))
+                .Select(a => a.Address.ToString())
+                .Distinct()
+                .ToList();
 
         static HashSet<string> CustomKeys(string stateFile)
         {

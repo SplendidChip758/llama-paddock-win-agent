@@ -104,35 +104,32 @@ namespace LlamaPaddock.Agent
             }
         }
 
-        public static void Grant(string path, IdentityReference who, FileSystemRights rights)
-        {
-            var dir = new DirectoryInfo(path);
-            var acl = dir.GetAccessControl();
-            acl.AddAccessRule(new FileSystemAccessRule(who, rights,
-                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit, PropagationFlags.None, AccessControlType.Allow));
-            dir.SetAccessControl(acl);
-        }
+        // Grants on folders the installer doesn't own go through icacls. .NET's SetAccessControl writes the
+        // whole list, and Windows then re-applies inheritance to everything below: for a user's profile
+        // folder that is every file in it (around a million on a used PC), which took many minutes.
+        // icacls changes only the entry, and walks the subtree only for an inheritable one.
+
+        /// <summary>Read and execute, or modify, on the folder and everything in it.</summary>
+        public static void Grant(string path, IdentityReference who, FileSystemRights rights) =>
+            Icacls(path, "/grant", $"*{Sid(who)}:(OI)(CI){(rights == FileSystemRights.Modify ? "M" : "RX")}");
 
         /// <summary>
         /// Open and list the folder itself, not its files or subfolders. Read and execute rather than just
         /// list: Go opens a folder for generic read, which also needs its permissions and extended attributes.
         /// </summary>
-        public static void GrantList(string path, IdentityReference who)
-        {
-            var dir = new DirectoryInfo(path);
-            var acl = dir.GetAccessControl();
-            acl.AddAccessRule(new FileSystemAccessRule(who, FileSystemRights.ReadAndExecute | FileSystemRights.Synchronize,
-                InheritanceFlags.None, PropagationFlags.None, AccessControlType.Allow));
-            dir.SetAccessControl(acl);
-        }
+        public static void GrantList(string path, IdentityReference who) => Icacls(path, "/grant", $"*{Sid(who)}:(RX)");
 
         public static void Revoke(string path, IdentityReference who)
         {
-            var dir = new DirectoryInfo(path);
-            if (!dir.Exists) return;
-            var acl = dir.GetAccessControl();
-            acl.PurgeAccessRules(who);
-            dir.SetAccessControl(acl);
+            if (Directory.Exists(path)) Icacls(path, "/remove", $"*{Sid(who)}");
+        }
+
+        static string Sid(IdentityReference who) => who.Translate(typeof(SecurityIdentifier)).Value;
+
+        static void Icacls(string path, string action, string entry)
+        {
+            var (code, output) = Run("icacls.exe", path, action, entry, "/C", "/Q");
+            if (code != 0) throw new InvalidOperationException($"icacls {action} on {path}: {output}");
         }
 
         /// <summary>Only SYSTEM, Administrators and the service: the folder holds the token and the TLS key.</summary>
