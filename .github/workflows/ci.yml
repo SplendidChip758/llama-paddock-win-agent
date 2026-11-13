@@ -58,6 +58,7 @@ jobs:
         run: dotnet build test/fake-ollama -c Release -o "$env:RUNNER_TEMP/fake-ollama" -warnaserror
 
       - name: Install, use, upgrade and uninstall
+        timeout-minutes: 20
         shell: pwsh
         run: ./test/service.ps1 -Setup dist/llama-paddock-agent-setup.exe -FakeOllama "$env:RUNNER_TEMP/fake-ollama/ollama.exe"
 

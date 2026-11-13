@@ -48,7 +48,9 @@ function OllamaProcesses {
 function Trays { @(Get-Process paddock-agent-tray -ErrorAction SilentlyContinue) }
 function RunSetup([string]$exe, [string[]]$more = @()) {
   $log = Join-Path $env:RUNNER_TEMP "setup-$([Guid]::NewGuid().ToString('N').Substring(0, 6)).log"
-  $p = Start-Process $exe -ArgumentList (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"") + $more) -Wait -PassThru
+  # not -Wait: that waits for every process it starts too, and the setup starts the tray app
+  $p = Start-Process $exe -ArgumentList (@('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/LOG=`"$log`"") + $more) -PassThru
+  if (-not $p.WaitForExit(300000)) { Write-Host "the setup didn't finish in 5 minutes"; Get-Content $log -Tail 40 | Write-Host; return -1 }
   if ($p.ExitCode -ne 0) { Get-Content $log -Tail 40 | Write-Host }
   $p.ExitCode
 }
