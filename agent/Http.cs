@@ -1,6 +1,4 @@
-using System.Globalization;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace LlamaPaddock.Agent;
 
@@ -20,43 +18,11 @@ public sealed class HttpError(int status, string detail) : Exception(detail)
 }
 
 /// <summary>Reading requests the way the Node agent does, so both answer a request the same.</summary>
-public static partial class Http
+public static class Http
 {
     /// <summary>The first value of a query parameter, or null: URLSearchParams.get().</summary>
     public static string? Query(this HttpRequest req, string name) =>
         req.Query.TryGetValue(name, out var v) && v.Count > 0 ? v[0] : null;
-
-    /// <summary>
-    /// JavaScript's <c>Number(s)</c>: null and blank give 0, anything that isn't a number NaN. The routes
-    /// keep the Node agent's fallbacks (<c>Number(x) || default</c>, <c>Number.isFinite</c>) on top.
-    /// </summary>
-    public static double JsNumber(string? s)
-    {
-        if (s is null) return 0;
-        s = s.Trim().Trim('﻿').Trim();
-        if (s == "") return 0;
-        switch (s)
-        {
-            case "Infinity" or "+Infinity": return double.PositiveInfinity;
-            case "-Infinity": return double.NegativeInfinity;
-        }
-        if (s.Length > 2 && s[0] == '0' && "xXoObB".Contains(s[1]))
-        {
-            int radix = char.ToLowerInvariant(s[1]) switch { 'x' => 16, 'o' => 8, _ => 2 };
-            double n = 0;
-            foreach (char c in s.AsSpan(2))
-            {
-                int d = c is >= '0' and <= '9' ? c - '0' : c is >= 'a' and <= 'f' ? c - 'a' + 10 : c is >= 'A' and <= 'F' ? c - 'A' + 10 : 99;
-                if (d >= radix) return double.NaN;
-                n = n * radix + d;
-            }
-            return n;
-        }
-        return DecimalLiteral().IsMatch(s) ? double.Parse(s, NumberStyles.Float, CultureInfo.InvariantCulture) : double.NaN;
-    }
-
-    [GeneratedRegex(@"^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$")]
-    private static partial Regex DecimalLiteral();
 
     /// <summary>The body as JSON, <c>{}</c> when empty; 400 when it isn't JSON, 413 over Kestrel's 1 MB limit.</summary>
     public static async Task<JsonElement> ReadJson(this HttpRequest req)

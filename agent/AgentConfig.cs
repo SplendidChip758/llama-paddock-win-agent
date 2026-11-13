@@ -25,7 +25,7 @@ public sealed class AgentConfig
         if (File.Exists(path))
         {
             // older installers wrote a UTF-8 BOM
-            var text = File.ReadAllText(path).TrimStart('﻿');
+            var text = File.ReadAllText(path).TrimStart('\ufeff');
             try
             {
                 using var doc = JsonDocument.Parse(text);

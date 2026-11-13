@@ -26,6 +26,15 @@ bash -n .github/scripts/prepare-release.sh
 
 CI also parses `install.ps1` and `uninstall.ps1` with PowerShell and starts the agent on a Windows runner.
 
+The C# agent in `agent/` is replacing the Node agent, so the two have to answer the same. On Windows, with the .NET 10 SDK and Node:
+
+```bash
+dotnet build agent -c Release
+node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe
+```
+
+It runs both agents on the same log files, in dry run, and compares their answers. When you port a route, add its cases there.
+
 ### Testing with the dashboard
 
 llama-paddock's scenario tests run its dashboard against simulated agents (`test/sim/paddock-sim.mjs`). When the API changes, change the simulated agent there too, and the Linux agent in [llama-paddock-agent](https://github.com/SplendidChip758/llama-paddock-agent), each in its own PR, and say in each PR which one to merge first.

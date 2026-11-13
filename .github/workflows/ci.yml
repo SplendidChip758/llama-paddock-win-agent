@@ -60,6 +60,30 @@ jobs:
           test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:11435/stats)" = 401
           curl -fsS -H "Authorization: Bearer ci-token" http://127.0.0.1:11435/stats > /dev/null
 
+  # The C# agent (agent/) replaces the Node agent, so the two have to answer the
+  # same: test/compare.mjs runs both on the same log files and compares them.
+  compare:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Build the C# agent
+        run: dotnet build agent -c Release -warnaserror
+
+      - name: Both agents answer the same
+        run: node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe
+
   # PRs into main are merged with a merge commit, so every commit in them reaches
   # semantic-release, not just the PR title. PRs into dev are squash-merged, and
   # the pr-title check covers them.

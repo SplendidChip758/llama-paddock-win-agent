@@ -26,7 +26,42 @@ public sealed class Api
         this.fingerprint = fingerprint;
         Routes = new Dictionary<string, Func<HttpContext, Task<object>>>
         {
-            ["GET /health"] = _ => Task.FromResult<object>(new { ok = true, version = Version, protocol = Protocol, platform = "windows", hostname, fingerprint }),
+            ["GET /health"] = _ => Done(new { ok = true, version = Version, protocol = Protocol, platform = "windows", hostname, fingerprint }),
+            ["GET /logs"] = ctx =>
+            {
+                // slice() drops the fraction of a number like 15.5
+                var lines = (int)Math.Max(10, Math.Min(Or(Js.Number(ctx.Request.Query("lines")), 200), 2000));
+                return Done(new { lines = OllamaLog.Tail(LogFile(), lines) });
+            },
+            ["GET /gpu-check"] = _ => Done(new { ts = Js.Now(), platform = "windows", log = OllamaLog.GpuLog(LogFile()) }),
+            ["POST /gpu/reload-uvm"] = _ =>
+                throw new HttpError(400, "nvidia_uvm is a Linux kernel module; on Windows, restart Ollama instead"),
+            ["GET /runner-starts"] = ctx =>
+            {
+                double now = Js.Now();
+                double since = Math.Max(now - 86400, Math.Min(Or(Js.Number(ctx.Request.Query("since")), now - 3600), now));
+                return Done(Merge(new() { ["ts"] = now }, OllamaLog.RunnerStarts(LogFile(), since)));
+            },
+            // ?since=<unix seconds>: the requests after it, from Ollama's log
+            ["GET /requests"] = ctx =>
+            {
+                double since = Js.Number(ctx.Request.Query("since"));
+                return Done(OllamaLog.Requests(LogFile(), double.IsFinite(since) && since > 0 ? since : Js.Now() - 3600));
+            },
         };
+    }
+
+    string LogFile() => session.RequireUser().LogFile;
+
+    static Task<object> Done(object body) => Task.FromResult(body);
+
+    /// <summary><c>x || fallback</c> for a number: NaN and 0 take the fallback.</summary>
+    static double Or(double x, double fallback) => double.IsNaN(x) || x == 0 ? fallback : x;
+
+    /// <summary><c>{ ...a, ...b }</c>, keeping the Node agent's field order.</summary>
+    static Dictionary<string, object?> Merge(Dictionary<string, object?> a, object b)
+    {
+        foreach (var p in b.GetType().GetProperties()) a[p.Name] = p.GetValue(b);
+        return a;
     }
 }
