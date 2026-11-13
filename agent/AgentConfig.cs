@@ -50,4 +50,11 @@ public sealed class AgentConfig
     public bool DryRun => Get("PADDOCK_DRY_RUN") == "1";
     public string TlsKey => Get("PADDOCK_AGENT_TLS_KEY", Path.Combine(DataDir, "agent.key"));
     public string TlsCert => Get("PADDOCK_AGENT_TLS_CERT", Path.Combine(DataDir, "agent.crt"));
+    /// <summary>The Ollama desktop app; empty: where its installer puts it for the Ollama user.</summary>
+    public string OllamaApp => Get("PADDOCK_OLLAMA_APP");
+    /// <summary>
+    /// The account (SID) that runs Ollama, recorded by the setup. Empty: the owner of the running Ollama.
+    /// The service runs as another account, so it can't use its own.
+    /// </summary>
+    public string OllamaUserSid => Get("PADDOCK_OLLAMA_USER_SID");
 }

@@ -1,14 +1,11 @@
 using System.Net;
 using System.Security.Cryptography;
+using System.Security.Principal;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using LlamaPaddock.Agent;
-
-const string Version = "0.0.0-dev";
-// The agent API's protocol, shared with the Linux agent. Unlike Version it only goes up when the API
-// changes in a way older dashboards can't follow, never for fixes or new optional fields.
-const int Protocol = 1;
+using Microsoft.Extensions.Hosting.WindowsServices;
 
 var dataDir = Environment.GetEnvironmentVariable("PADDOCK_AGENT_DATA")
     ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "llama-paddock-agent");
@@ -17,6 +14,15 @@ if (cfg.Token == "")
 {
     Console.Error.WriteLine("PADDOCK_AGENT_TOKEN must be set (agent.json or environment)");
     return 1;
+}
+if (cfg.OllamaUserSid != "")
+{
+    try { _ = new SecurityIdentifier(cfg.OllamaUserSid); }
+    catch (ArgumentException)
+    {
+        Console.Error.WriteLine($"PADDOCK_OLLAMA_USER_SID is not an account ID (S-1-5-21-…): {cfg.OllamaUserSid}");
+        return 1;
+    }
 }
 
 var builder = WebApplication.CreateSlimBuilder(args);
@@ -41,8 +47,11 @@ builder.WebHost.ConfigureKestrel(k =>
 var app = builder.Build();
 // Node's JSON.stringify: names as written, "+" and the like unescaped
 var json = new JsonSerializerOptions { PropertyNamingPolicy = null, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
-// the DNS name keeps its case; MachineName is the upper-case NetBIOS name
-var hostname = Dns.GetHostName();
+
+// A service runs as another account, so it reaches the Ollama user's session through the tray app;
+// started any other way, the agent is that user.
+IUserSession session = WindowsServiceHelpers.IsWindowsService() ? new HelperSession(cfg) : new InProcessSession(cfg);
+var routes = new Api(session, fingerprint).Routes;
 
 Task Send(HttpContext ctx, int status, object body)
 {
@@ -56,11 +65,6 @@ bool Authorized(HttpRequest req)
     var supplied = Encoding.UTF8.GetBytes(h.StartsWith("bearer ", StringComparison.OrdinalIgnoreCase) ? h[7..] : "");
     return CryptographicOperations.FixedTimeEquals(supplied, Encoding.UTF8.GetBytes(cfg.Token));
 }
-
-var routes = new Dictionary<string, Func<HttpContext, Task<object>>>
-{
-    ["GET /health"] = _ => Task.FromResult<object>(new { ok = true, version = Version, protocol = Protocol, platform = "windows", hostname, fingerprint }),
-};
 
 app.Run(async ctx =>
 {
@@ -88,11 +92,9 @@ app.Run(async ctx =>
 
 var modes = string.Join(" + ", new[] { tls is null ? null : "HTTPS", cfg.HttpOn ? "HTTP" : null }.Where(m => m is not null));
 app.Logger.LogInformation("llama-paddock agent {Version} (windows) listening on {Bind}:{Port} ({Modes}), key {Fingerprint}",
-    Version, cfg.Bind, cfg.Port, modes, fingerprint ?? "none");
+    Api.Version, cfg.Bind, cfg.Port, modes, fingerprint ?? "none");
+var ollamaUser = session.User();
+app.Logger.LogInformation("Ollama user: {User} ({Mode}), log {Log}",
+    ollamaUser?.Name ?? "unknown until Ollama runs", session.Mode, ollamaUser?.LogFile ?? "-");
 app.Run();
 return 0;
-
-sealed class HttpError(int status, string detail) : Exception(detail)
-{
-    public int Status { get; } = status;
-}
