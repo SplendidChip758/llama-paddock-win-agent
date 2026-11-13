@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Runs the Node agent and the C# agent side by side on the same files and checks that they answer
+ * Runs the Node agent (test/legacy, which the C# agent replaces) and the C# agent side by side on the same files and checks that they answer
  * the same: status and JSON body, apart from fields that change between calls (ts, version, and
  * /requests' until when it is "now"). /stats changes with every call, so it has to match in fields
  * and types, and in the values that hold still. Windows only; plain Node, no dependencies.
@@ -61,7 +61,7 @@ const logFile = path.join(logDir, "server.log");
 const data = path.join(tmp, "data");
 fs.mkdirSync(data, { recursive: true });
 // the Node agent keeps agent-state.json next to itself: a copy in the data folder shares it with the C# agent
-fs.copyFileSync(path.join(ROOT, "paddock-agent.mjs"), path.join(data, "paddock-agent.mjs"));
+fs.copyFileSync(path.join(ROOT, "test", "legacy", "paddock-agent.mjs"), path.join(data, "paddock-agent.mjs"));
 const stateFile = path.join(data, "agent-state.json");
 const env = {
   ...process.env,
@@ -366,7 +366,8 @@ async function checkRestart(csCmd, csArgs) {
   const tree = execFileSync(sys32("WindowsPowerShell\\v1.0\\powershell.exe"), ["-NoProfile", "-Command",
     "Get-CimInstance Win32_Process -Filter \"Name='ollama.exe'\" | % { \"$($_.ProcessId) $($_.ParentProcessId)\" }"], { encoding: "utf8" });
   const procs = tree.trim().split(/\r?\n/).filter(Boolean).map((l) => l.trim().split(/\s+/).map(Number));
-  const fakePids = new Set();
+  // the fake's server is one we started, its runner that server's child
+  const fakePids = new Set(procs.map(([pid]) => pid).filter((pid) => ours.has(pid)));
   for (let changed = true; changed;) {
     changed = false;
     for (const [pid, parent] of procs) if (!fakePids.has(pid) && (ours.has(parent) || fakePids.has(parent))) { fakePids.add(pid); changed = true; }
