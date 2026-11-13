@@ -87,6 +87,8 @@ try {
   Check 'the service runs as LocalSystem' ((Get-CimInstance Win32_Service -Filter "Name='$name'").StartName -eq 'LocalSystem')
   Check 'the tray app starts at sign-in' ((Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run').'llama-paddock agent' -like "*$prog*")
   Check 'the setup started the tray app' (WaitFor 10 { (Trays).Count -gt 0 })
+  $log = Join-Path $data 'logs\agent.log'
+  Check 'the service logs to agent.log' ((Test-Path $log) -and (Select-String -Path $log -Pattern 'listening on' -Quiet))
   $acl = (Get-Acl $data).Access | ForEach-Object { $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } | Sort-Object -Unique
   Check 'only SYSTEM and administrators can read the data folder' (-not (Compare-Object $acl @('S-1-5-18', 'S-1-5-32-544'))) ($acl -join ', ')
 

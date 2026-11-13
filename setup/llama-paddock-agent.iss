@@ -57,6 +57,10 @@ VersionInfoProductName=llama-paddock agent
 Source: "{#Out}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 
+; to start the tray app again after closing it from its menu
+[Icons]
+Name: "{autoprograms}\llama-paddock agent"; Filename: "{app}\{#Tray}"
+
 [Code]
 var
   UserPage: TInputOptionWizardPage;

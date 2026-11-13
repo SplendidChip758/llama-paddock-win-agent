@@ -30,7 +30,8 @@ if (cfg.OllamaUserSid != "")
 
 var builder = WebApplication.CreateSlimBuilder(args);
 builder.Services.AddWindowsService(o => o.ServiceName = "llama-paddock-agent");
-var bootLog = LoggerFactory.Create(b => b.AddConsole()).CreateLogger("agent");
+builder.Logging.AddProvider(new FileLog(Path.Combine(dataDir, "logs")));
+var bootLog = LoggerFactory.Create(b => b.AddConsole().AddProvider(new FileLog(Path.Combine(dataDir, "logs")))).CreateLogger("agent");
 
 Tls.Identity? tls = null;
 try { tls = Tls.Load(cfg.TlsKey, cfg.TlsCert, bootLog); }

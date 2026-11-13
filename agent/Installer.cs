@@ -315,9 +315,9 @@ public static class Installer
                 StopService();
                 Run("schtasks.exe", "/Change", "/TN", TaskName, "/ENABLE");
                 Run("schtasks.exe", "/Run", "/TN", TaskName);
-                throw new InvalidOperationException($"{e.Message}. The Node agent was started again. The service's messages are in Event Viewer, Windows Logs > Application, source {ServiceName}");
+                throw new InvalidOperationException($"{e.Message}. The Node agent was started again. See {Path.Combine(DataDir, "logs", "agent.log")}");
             }
-            throw new InvalidOperationException($"{e.Message}. The service's messages are in Event Viewer, Windows Logs > Application, source {ServiceName}");
+            throw new InvalidOperationException($"{e.Message}. See {Path.Combine(DataDir, "logs", "agent.log")}");
         }
 
         if (hadTask) Run("schtasks.exe", "/Delete", "/TN", TaskName, "/F");
