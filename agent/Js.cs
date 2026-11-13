@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -179,6 +180,69 @@ public static partial class Js
         else if (tz.IsInvalidTime(local)) offset = tz.GetUtcOffset(local.AddDays(-1));
         else offset = tz.GetUtcOffset(local);
         return localMs - (long)offset.TotalMilliseconds;
+    }
+
+    /// <summary>/^[A-Za-z_][A-Za-z0-9_]*$/: a variable name the agents accept.</summary>
+    [GeneratedRegex(@"^[A-Za-z_][A-Za-z0-9_]*\z")]
+    public static partial Regex KeyRe();
+
+    /// <summary><c>obj?.name</c> after JSON.parse: the last of duplicate names wins; null on a non-object.</summary>
+    public static JsonElement? Property(JsonElement obj, string name)
+    {
+        if (obj.ValueKind != JsonValueKind.Object) return null;
+        JsonElement? found = null;
+        foreach (var p in obj.EnumerateObject()) if (p.Name == name) found = p.Value;
+        return found;
+    }
+
+    /// <summary>
+    /// <c>Object.entries(JSON.parse(…))</c>: a duplicate name keeps its first place and its last value,
+    /// and names that are array indexes ("0", "12") come first, in numeric order.
+    /// </summary>
+    public static List<KeyValuePair<string, JsonElement>> Entries(JsonElement obj)
+    {
+        var order = new List<string>();
+        var values = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var p in obj.EnumerateObject())
+        {
+            if (!values.ContainsKey(p.Name)) order.Add(p.Name);
+            values[p.Name] = p.Value;
+        }
+        static bool IsIndex(string k, out uint n)
+        {
+            n = 0;
+            return (k == "0" || (k.Length > 0 && k[0] is >= '1' and <= '9' && k.All(c => c is >= '0' and <= '9')))
+                && uint.TryParse(k, NumberStyles.None, CultureInfo.InvariantCulture, out n) && n != uint.MaxValue;
+        }
+        var indexes = order.Where(k => IsIndex(k, out _)).OrderBy(k => { IsIndex(k, out var n); return n; });
+        return indexes.Concat(order.Where(k => !IsIndex(k, out _))).Select(k => KeyValuePair.Create(k, values[k])).ToList();
+    }
+
+    /// <summary><c>JSON.stringify(s)</c> for a string, for error messages that quote what was sent.</summary>
+    public static string Stringify(string s)
+    {
+        var sb = new StringBuilder("\"");
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            switch (c)
+            {
+                case '"': sb.Append("\\\""); break;
+                case '\\': sb.Append("\\\\"); break;
+                case '\b': sb.Append("\\b"); break;
+                case '\f': sb.Append("\\f"); break;
+                case '\n': sb.Append("\\n"); break;
+                case '\r': sb.Append("\\r"); break;
+                case '\t': sb.Append("\\t"); break;
+                default:
+                    bool lone = char.IsHighSurrogate(c) ? !(i + 1 < s.Length && char.IsLowSurrogate(s[i + 1]))
+                        : char.IsLowSurrogate(c) && !(i > 0 && char.IsHighSurrogate(s[i - 1]));
+                    if (c < 0x20 || lone) sb.Append($"\\u{(int)c:x4}");
+                    else sb.Append(c);
+                    break;
+            }
+        }
+        return sb.Append('"').ToString();
     }
 
     /// <summary>The message Node gives for a failed file call, which the Node agent passes on.</summary>

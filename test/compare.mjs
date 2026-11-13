@@ -9,6 +9,10 @@
  *
  * The fake Ollama (test/fake-ollama) gives /stats a server and a model runner to find.
  *
+ * PUT /env writes the current user's real variables (HKCU\Environment). The test only writes names
+ * starting with OLLAMA_PADDOCK_TEST, PADDOCK_TEST or CUDA_PADDOCK_TEST, removes them afterwards, and
+ * skips its writes when the user has other Ollama variables, which a PUT would rewrite.
+ *
  * Both agents run in-process as the current user, in dry run, with LOCALAPPDATA pointing at a
  * folder of log fixtures that the cases below rewrite.
  */
@@ -36,6 +40,9 @@ const logDir = path.join(local, "Ollama");
 const logFile = path.join(logDir, "server.log");
 const data = path.join(tmp, "data");
 fs.mkdirSync(data, { recursive: true });
+// the Node agent keeps agent-state.json next to itself: a copy in the data folder shares it with the C# agent
+fs.copyFileSync(path.join(ROOT, "paddock-agent.mjs"), path.join(data, "paddock-agent.mjs"));
+const stateFile = path.join(data, "agent-state.json");
 const env = {
   ...process.env,
   LOCALAPPDATA: local,
@@ -45,6 +52,7 @@ const env = {
   PADDOCK_AGENT_TLS_KEY: path.join(tmp, "agent.key"),
   PADDOCK_AGENT_TLS_CERT: path.join(tmp, "agent.crt"),
   PADDOCK_AGENT_DATA: data,
+  PADDOCK_AGENT_ENV_ALLOW: " PADDOCK_TEST_*, ",
 };
 
 const agents = [];
@@ -250,11 +258,15 @@ function stable(route, body) {
   const { ts: _ts, ...rest } = body;
   if (route === "/health") delete rest.version;
   if (route === "/requests" && rest.more === false) delete rest.until;
+  // the Node agent listed the user's variables in a PowerShell hashtable's order
+  const sortLines = (t) => t.split("\n").sort().join("\n");
+  if (route === "/env" && typeof rest.raw === "string") rest.raw = sortLines(rest.raw);
+  if (route === "/env" && typeof rest.content === "string") rest.content = sortLines(rest.content);
   return rest;
 }
 
 async function call(port, c) {
-  const r = await fetch(`http://127.0.0.1:${port}${c.path}`, { method: c.method ?? "GET", headers: c.headers });
+  const r = await fetch(`http://127.0.0.1:${port}${c.path}`, { method: c.method ?? "GET", headers: c.headers, body: c.body });
   const text = await r.text();
   let body;
   try { body = JSON.parse(text); } catch { body = { unparsed: text }; }
@@ -273,15 +285,89 @@ function firstDifference(a, b, at = "") {
   return `${at || "body"}: node ${show(a)}, c# ${show(b)}`;
 }
 
+// ------------------------------------------------------------------ /env
+const TEST_NAME = /^(OLLAMA_PADDOCK_TEST|PADDOCK_TEST|CUDA_PADDOCK_TEST)/i;
+const reg = (...args) => execFileSync("reg", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+function userVarNames() {
+  const out = reg("query", "HKCU\\Environment");
+  return out.split(/\r?\n/).map((l) => /^ {4}(\S+) {4}REG_/.exec(l)?.[1]).filter(Boolean);
+}
+/** Only the test's own variables: CUDA_PADDOCK_TEST is read-only (not allowed), the other one stored as %VAR%. */
+function resetEnv(seed = true) {
+  for (const n of userVarNames()) if (TEST_NAME.test(n)) reg("delete", "HKCU\\Environment", "/v", n, "/f");
+  fs.writeFileSync(stateFile, JSON.stringify({ customKeys: [] }));
+  if (!seed) return;
+  reg("add", "HKCU\\Environment", "/v", "CUDA_PADDOCK_TEST", "/t", "REG_SZ", "/d", "keep", "/f");
+  reg("add", "HKCU\\Environment", "/v", "OLLAMA_PADDOCK_TEST_EXP", "/t", "REG_EXPAND_SZ", "/d", "%USERPROFILE%\\models", "/f");
+}
+const put = (body) => ({ method: "PUT", path: "/env", headers: { ...auth, "Content-Type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) });
+const envInvalid = [
+  "", "not json", "null", "[]", "5", '"x"', "{}", '{"vars":null}', '{"vars":[]}', '{"vars":"x"}', '{"vars":5}',
+  { vars: { "1bad": "x" } }, { vars: { "a b": "x" } }, { vars: { "\u00e9": "x" } }, { vars: { 'a"b\\c\u0001': "x" } },
+  { vars: { "bad key": "x", 9: "x" } }, { vars: { OLLAMA_PADDOCK_TEST_A: 5 } }, { vars: { OLLAMA_PADDOCK_TEST_A: null } },
+  { vars: { OLLAMA_PADDOCK_TEST_A: "a\nb" } }, { vars: { OLLAMA_PADDOCK_TEST_A: "a\u0000b" } },
+  { vars: { Path: "x" } }, { vars: { localappdata: "x" } }, { vars: { NOT_AN_OLLAMA_VAR: "x" } },
+  { vars: { CUDA_PADDOCK_TEST: "changed" } }, { vars: { cuda_paddock_test: "changed" } },
+  '{"vars":{"OLLAMA_PADDOCK_TEST_A":"x","OLLAMA_PADDOCK_TEST_A":5}}',
+  `{"vars":{"x":"${"y".repeat(1_000_001)}"}}`,
+];
+/** Each write case gets the current variables as a base, as the dashboard sends them. */
+const envWrites = [
+  (base) => ({ vars: { ...base, OLLAMA_PADDOCK_TEST_A: "1" }, restart: false }),
+  (base) => ({ vars: { ...base, OLLAMA_PADDOCK_TEST_A: "with spaces and %PATH%" } }),
+  () => ({ vars: { OLLAMA_PADDOCK_TEST_A: "1" }, restart: false }),
+  (base) => ({ vars: { ...base, PADDOCK_TEST_CUSTOM: "x" }, restart: false }),
+  (base) => ({ vars: { ...base, OLLAMA_PADDOCK_TEST_EXP: "" }, restart: false }),
+  (base) => ({ vars: { ...base }, restart: "no" }),
+  () => '{"vars":{"OLLAMA_PADDOCK_TEST_A":5,"OLLAMA_PADDOCK_TEST_A":"dup"},"restart":false}',
+];
+const readState = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
+
 let failed = 0, passed = 0;
+function record(label, what, diff) {
+  if (diff) {
+    failed++;
+    console.log(`FAIL ${label}: ${what}\n     ${diff}`);
+  } else passed++;
+}
+
+async function checkEnv() {
+  const get = { path: "/env", headers: auth };
+  resetEnv();
+  for (const body of envInvalid) await check("env", put(body));
+  await check("env", { ...put({ vars: {} }), headers: {} });
+
+  const foreign = (await call(NODE_PORT, get)).body.managed;
+  const others = Object.keys(foreign ?? {}).filter((k) => !TEST_NAME.test(k));
+  if (others.length) {
+    console.log(`SKIP env writes: this user has other Ollama variables (${others.join(", ")}), which a PUT would rewrite`);
+    return;
+  }
+  for (const [i, make] of envWrites.entries()) {
+    const label = `env write ${i + 1}`;
+    const results = [];
+    for (const port of [NODE_PORT, CS_PORT]) {
+      resetEnv();
+      await check(`${label} before`, get);
+      const base = (await call(NODE_PORT, get)).body.managed;
+      const body = make(base);
+      const res = await call(port, put(body));
+      // the variables as both agents now read them, and the custom names they keep
+      const [n, s] = await Promise.all([call(NODE_PORT, get), call(CS_PORT, get)]);
+      record(`${label} after ${port === NODE_PORT ? "node" : "c#"}'s write`, "GET /env", n.status !== s.status ? `status ${n.status} vs ${s.status}` : firstDifference(n.body, s.body));
+      results.push({ res, after: n.body, state: readState(), raw: userVarNames().filter((x) => TEST_NAME.test(x)).sort() });
+    }
+    const [nr, sr] = results;
+    record(label, `PUT /env ${JSON.stringify(make({})).slice(0, 80)}`,
+      nr.res.status !== sr.res.status ? `status: node ${nr.res.status}, c# ${sr.res.status} (${JSON.stringify(nr.res.body)} / ${JSON.stringify(sr.res.body)})`
+        : firstDifference(nr.res.body, sr.res.body) ?? firstDifference(nr.after, sr.after) ?? firstDifference(nr.state, sr.state) ?? firstDifference(nr.raw, sr.raw));
+  }
+}
 async function check(label, c) {
   const [n, s] = await Promise.all([call(NODE_PORT, c), call(CS_PORT, c)]);
   if (n.body?.system?.ollama_process) n.body.system.ollama_process.runners += await llamaServers();
   const diff = n.status !== s.status ? `status: node ${n.status}, c# ${s.status}` : firstDifference(n.body, s.body);
-  if (diff) {
-    failed++;
-    console.log(`FAIL ${label}: ${c.method ?? "GET"} ${c.path}\n     ${diff}`);
-  } else passed++;
+  record(label, `${c.method ?? "GET"} ${c.path}${c.body ? ` ${c.body.slice(0, 80)}` : ""}`, diff);
 }
 
 try {
@@ -294,13 +380,18 @@ try {
       await new Promise((r) => setTimeout(r, 250));
     }
   }
-  start("node", process.execPath, [path.join(ROOT, "paddock-agent.mjs")], NODE_PORT);
+  start("node", process.execPath, [path.join(data, "paddock-agent.mjs")], NODE_PORT);
   // the Node agent makes the key first; the C# agent then loads the same one
   await waitHealthy(NODE_PORT, "node");
   start("csharp", csCmd, csArgs, CS_PORT);
   await waitHealthy(CS_PORT, "csharp");
 
   for (const c of general) await check("general", c);
+  try {
+    await checkEnv();
+  } finally {
+    resetEnv(false);
+  }
   for (const [label, setup] of fixtures) {
     setup();
     for (const p of LOG_ROUTES) await check(label, { path: p, headers: auth });

@@ -102,7 +102,7 @@ public sealed class OllamaUser
     /// <summary>The user's own variables (HKCU\Environment), expanded; null while they're signed out.</summary>
     public Dictionary<string, string>? UserVariables()
     {
-        if (self) return FromProcess(EnvironmentVariableTarget.User);
+        if (self) return FromRegistry(Registry.CurrentUser, "Environment");
         using var key = Registry.Users.OpenSubKey($@"{Sid}\Environment");
         if (key is null) return null;
         var lookup = ExpansionBase();
@@ -112,7 +112,7 @@ public sealed class OllamaUser
     /// <summary>The PC's variables, expanded the way the user's programs see them.</summary>
     public Dictionary<string, string> MachineVariables()
     {
-        if (self) return FromProcess(EnvironmentVariableTarget.Machine);
+        if (self) return FromRegistry(Registry.LocalMachine, MachineKey);
         return MachineRaw(ExpansionBase());
     }
 
@@ -124,7 +124,39 @@ public sealed class OllamaUser
         return Path.Combine(Profile, ".ollama", "models");
     }
 
-    // The same as the Node agent's [Environment]::GetEnvironmentVariables(scope)
+    const string MachineKey = @"SYSTEM\CurrentControlSet\Control\Session Manager\Environment";
+
+    /// <summary>
+    /// What [Environment]::GetEnvironmentVariables(scope) gave the Node agent: the key's values, %VARS%
+    /// expanded with the agent's own environment, which is the user's. Read here so they keep the
+    /// registry's order.
+    /// </summary>
+    static Dictionary<string, string> FromRegistry(RegistryKey root, string path)
+    {
+        var vars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        using var key = root.OpenSubKey(path);
+        if (key is null) return vars;
+        foreach (var name in key.GetValueNames())
+            if (name != "") vars[name] = key.GetValue(name, "")?.ToString() ?? "";
+        return vars;
+    }
+
+    /// <summary>
+    /// Set or remove (null or empty) the user's own variables. Plain strings, as SetEnvironmentVariable
+    /// writes them. Programs see them once the session is told (IUserSession.NotifyEnvironmentChanged).
+    /// </summary>
+    public void WriteUserVariables(IEnumerable<KeyValuePair<string, string?>> changes)
+    {
+        using var key = self
+            ? Registry.CurrentUser.CreateSubKey("Environment", true)
+            : Registry.Users.OpenSubKey($@"{Sid}\Environment", true) ?? throw HttpError.NotSignedIn();
+        foreach (var (name, value) in changes)
+        {
+            if (string.IsNullOrEmpty(value)) key.DeleteValue(name, false);
+            else key.SetValue(name, value, RegistryValueKind.String);
+        }
+    }
+
     static Dictionary<string, string> FromProcess(EnvironmentVariableTarget target)
     {
         var vars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -153,7 +185,7 @@ public sealed class OllamaUser
 
     static Dictionary<string, string> MachineRaw(Dictionary<string, string> lookup)
     {
-        using var key = Registry.LocalMachine.OpenSubKey(@"SYSTEM\CurrentControlSet\Control\Session Manager\Environment");
+        using var key = Registry.LocalMachine.OpenSubKey(MachineKey);
         return key is null ? new(StringComparer.OrdinalIgnoreCase) : Read(key, lookup);
     }
 

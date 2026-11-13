@@ -34,7 +34,7 @@ dotnet build test/fake-ollama -c Release -o "$TEMP/fake-ollama"
 node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$TEMP/fake-ollama/ollama.exe"
 ```
 
-It runs both agents on the same log files, in dry run, with a fake Ollama (a server and one model runner) for `/stats` to find, and compares their answers. `/stats` changes between calls, so it's compared by fields and types, plus the values that hold still. When you port a route, add its cases there.
+It runs both agents on the same log files, in dry run, with a fake Ollama (a server and one model runner) for `/stats` to find, and compares their answers. `/stats` changes between calls, so it's compared by fields and types, plus the values that hold still. `PUT /env` writes your real user variables: the test only writes names starting with `OLLAMA_PADDOCK_TEST`, `PADDOCK_TEST` or `CUDA_PADDOCK_TEST`, removes them afterwards, and skips its writes when you have other Ollama variables. When you port a route, add its cases there.
 
 ### Testing with the dashboard
 
