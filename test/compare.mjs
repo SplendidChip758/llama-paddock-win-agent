@@ -33,6 +33,8 @@ import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { fileURLToPath } from "node:url";
 
+// Windows' own tools by path: CI's shell is Git Bash, whose whoami and the like come first on the PATH
+const sys32 = (exe) => path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", exe);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN = "compare-token";
 const NODE_PORT = 11541, CS_PORT = 11542, FAKE_OLLAMA_HOST = "127.0.0.1:11545";
@@ -93,7 +95,7 @@ async function waitHealthy(port, name) {
 function stopAll() {
   // with /T: the fake Ollama's model runner goes too
   for (const a of agents.splice(0)) {
-    try { execFileSync("taskkill", ["/PID", String(a.pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* already gone */ }
+    try { execFileSync(sys32("taskkill.exe"), ["/PID", String(a.pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* already gone */ }
   }
 }
 process.on("exit", stopAll);
@@ -269,7 +271,7 @@ function statsView(b) {
 
 /** llama-server.exe processes now running: the Node agent on dev doesn't count them as runners yet. */
 async function llamaServers() {
-  const out = execFileSync("tasklist", ["/FO", "CSV", "/NH", "/FI", "IMAGENAME eq llama-server.exe"], { encoding: "utf8" });
+  const out = execFileSync(sys32("tasklist.exe"), ["/FO", "CSV", "/NH", "/FI", "IMAGENAME eq llama-server.exe"], { encoding: "utf8" });
   return out.split(/\r?\n/).filter((l) => l.toLowerCase().startsWith('"llama-server.exe"')).length;
 }
 
@@ -309,7 +311,7 @@ function firstDifference(a, b, at = "") {
 
 // ------------------------------------------------------------------ /env
 const TEST_NAME = /^(OLLAMA_PADDOCK_TEST|PADDOCK_TEST|CUDA_PADDOCK_TEST)/i;
-const reg = (...args) => execFileSync("reg", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+const reg = (...args) => execFileSync(sys32("reg.exe"), args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
 function userVarNames() {
   const out = reg("query", "HKCU\\Environment");
   return out.split(/\r?\n/).map((l) => /^ {4}(\S+) {4}REG_/.exec(l)?.[1]).filter(Boolean);
@@ -348,7 +350,7 @@ const readState = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
 // ------------------------------------------------------------------ restart
 /** PIDs of a process name from tasklist. */
 function pidsOf(image) {
-  const out = execFileSync("tasklist", ["/FO", "CSV", "/NH", "/FI", `IMAGENAME eq ${image}`], { encoding: "utf8" });
+  const out = execFileSync(sys32("tasklist.exe"), ["/FO", "CSV", "/NH", "/FI", `IMAGENAME eq ${image}`], { encoding: "utf8" });
   return out.split(/\r?\n/).filter((l) => l.toLowerCase().startsWith(`"${image}"`)).map((l) => Number(l.split('","')[1]));
 }
 
@@ -361,7 +363,7 @@ async function checkRestart(csCmd, csArgs) {
     return;
   }
   // the fake's server and runner are children of ours; any other ollama.exe is a real Ollama
-  const tree = execFileSync("powershell.exe", ["-NoProfile", "-Command",
+  const tree = execFileSync(sys32("WindowsPowerShell\\v1.0\\powershell.exe"), ["-NoProfile", "-Command",
     "Get-CimInstance Win32_Process -Filter \"Name='ollama.exe'\" | % { \"$($_.ProcessId) $($_.ParentProcessId)\" }"], { encoding: "utf8" });
   const procs = tree.trim().split(/\r?\n/).filter(Boolean).map((l) => l.trim().split(/\s+/).map(Number));
   const fakePids = new Set();
@@ -402,12 +404,12 @@ async function checkRestart(csCmd, csArgs) {
   } finally {
     reg("delete", "HKCU\\Environment", "/v", "OLLAMA_HOST", "/f");
     // the restarted fake isn't a child of ours
-    try { execFileSync("taskkill", ["/IM", "ollama.exe", "/F", "/T"], { stdio: "ignore" }); } catch { /* none left */ }
+    try { execFileSync(sys32("taskkill.exe"), ["/IM", "ollama.exe", "/F", "/T"], { stdio: "ignore" }); } catch { /* none left */ }
   }
 }
 
 // ------------------------------------------------------------------ helper mode
-const mySid = () => execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim().split(",")[1].replace(/"/g, "");
+const mySid = () => execFileSync(sys32("whoami.exe"), ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim().split(",")[1].replace(/"/g, "");
 const helperEnv = (live) => ({
   PADDOCK_AGENT_MODE: "helper",
   PADDOCK_OLLAMA_USER_SID: mySid(),
@@ -454,7 +456,7 @@ async function checkHelper(csCmd, csArgs) {
     const strict = startTray(false);
     await new Promise((r) => setTimeout(r, 3000));
     same("helper, tray app for SYSTEM only", "PUT /env", NO_HELPER, await call(HELPER_PORT, write));
-    execFileSync("taskkill", ["/PID", String(strict.pid), "/F"], { stdio: "ignore" });
+    execFileSync(sys32("taskkill.exe"), ["/PID", String(strict.pid), "/F"], { stdio: "ignore" });
     await new Promise((r) => setTimeout(r, 500));
 
     startTray();
@@ -482,7 +484,7 @@ async function checkHelperRestart() {
   const label = "helper restart";
   const before = pidsOf("ollama.exe");
   const r = await call(HELPER_LIVE_PORT, { method: "POST", path: "/service/restart", headers: auth });
-  const procs = execFileSync("powershell.exe", ["-NoProfile", "-Command",
+  const procs = execFileSync(sys32("WindowsPowerShell\\v1.0\\powershell.exe"), ["-NoProfile", "-Command",
     "Get-CimInstance Win32_Process -Filter \"Name='ollama.exe'\" | % { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }"], { encoding: "utf8" })
     .trim().split(/\r?\n/).filter(Boolean).map((l) => l.trim().split(/\s+/));
   const server = procs.find((p) => / serve$/.test(p.slice(2).join(" ")));
