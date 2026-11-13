@@ -13,8 +13,11 @@ public interface IUserSession
     /// <summary>Who runs Ollama right now, or null when the agent can't tell.</summary>
     OllamaUser? User();
 
-    /// <summary>Whether Launch can start Ollama in the user's session now. Checked before Ollama is stopped.</summary>
-    bool CanLaunch { get; }
+    /// <summary>
+    /// Whether work in the user's session can be done now. Checked before anything changes, so a
+    /// 409 never leaves Ollama stopped or variables half applied.
+    /// </summary>
+    Task<bool> Ready(CancellationToken ct);
 
     /// <summary>Tell the session the user's variables changed, so Ollama started afterwards sees them.</summary>
     Task NotifyEnvironmentChanged(CancellationToken ct);
@@ -36,7 +39,7 @@ public sealed class InProcessSession(AgentConfig cfg) : IUserSession
 
     public string Mode => "in-process";
     public OllamaUser? User() => user;
-    public bool CanLaunch => true;
+    public Task<bool> Ready(CancellationToken ct) => Task.FromResult(true);
 
     public Task NotifyEnvironmentChanged(CancellationToken ct)
     {
@@ -53,16 +56,26 @@ public sealed class InProcessSession(AgentConfig cfg) : IUserSession
 
 /// <summary>
 /// The service: the user is looked up on each call, since they can sign out and another can start
-/// Ollama. Work inside their session goes to the tray app over a named pipe that only they and
-/// SYSTEM can open. Until the tray app answers there, that work answers 409.
+/// Ollama. Work inside their session goes to their tray app (HelperPipe); while it isn't running,
+/// that work answers 409.
 /// </summary>
 public sealed class HelperSession(AgentConfig cfg) : IUserSession
 {
     public string Mode => "helper";
     public OllamaUser? User() => OllamaUser.Find(cfg);
 
-    // the pipe to the tray app is built with service mode
-    public bool CanLaunch => false;
-    public Task NotifyEnvironmentChanged(CancellationToken ct) => throw HttpError.NoHelper();
-    public Task Launch(LaunchRequest request, CancellationToken ct) => throw HttpError.NoHelper();
+    public async Task<bool> Ready(CancellationToken ct) =>
+        User() is { } user && await HelperPipe.Send(user.Sid, new(HelperPipe.Ping), TimeSpan.FromSeconds(2), ct) is { Ok: true };
+
+    public Task NotifyEnvironmentChanged(CancellationToken ct) => Send(new(HelperPipe.NotifyEnvironment), ct);
+
+    public Task Launch(LaunchRequest request, CancellationToken ct) => Send(new(HelperPipe.Launch, request), ct);
+
+    async Task Send(HelperPipe.Request request, CancellationToken ct)
+    {
+        var user = this.RequireUser();
+        // announcing variables waits on every window in the session, which can take a few seconds
+        var answer = await HelperPipe.Send(user.Sid, request, TimeSpan.FromSeconds(30), ct) ?? throw HttpError.NoHelper();
+        if (!answer.Ok) throw new HttpError(500, $"the tray app couldn't do it: {answer.Error}");
+    }
 }

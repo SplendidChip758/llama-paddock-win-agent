@@ -184,4 +184,20 @@ static class Native
         }
         return sb.Append('\\', slashes * 2).Append('"').ToString();
     }
+
+    // ---------------------------------------------------------------- the helper's pipe
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetNamedPipeServerProcessId(SafePipeHandle pipe, out uint pid);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint pid);
+
+    /// <summary>The process serving a pipe we connected to, or null.</summary>
+    public static int? PipeServerProcessId(SafePipeHandle pipe) =>
+        GetNamedPipeServerProcessId(pipe, out var pid) ? (int)pid : null;
+
+    /// <summary>The process that connected to a pipe we serve, or null.</summary>
+    public static int? PipeClientProcessId(SafePipeHandle pipe) =>
+        GetNamedPipeClientProcessId(pipe, out var pid) ? (int)pid : null;
 }

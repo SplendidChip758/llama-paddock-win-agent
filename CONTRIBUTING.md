@@ -30,11 +30,15 @@ The C# agent in `agent/` is replacing the Node agent, so the two have to answer 
 
 ```bash
 dotnet build agent -c Release
+dotnet build tray -c Release
 dotnet build test/fake-ollama -c Release -o "$TEMP/fake-ollama"
-node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$TEMP/fake-ollama/ollama.exe"
+node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$TEMP/fake-ollama/ollama.exe" \
+  --tray=tray/bin/Release/net10.0-windows/paddock-agent-tray.exe
 ```
 
-It runs both agents on the same log files, in dry run, with a fake Ollama (a server and one model runner) for `/stats` to find, and compares their answers. `/stats` changes between calls, so it's compared by fields and types, plus the values that hold still. `PUT /env` writes your real user variables: the test only writes names starting with `OLLAMA_PADDOCK_TEST`, `PADDOCK_TEST` or `CUDA_PADDOCK_TEST`, removes them afterwards, and skips its writes when you have other Ollama variables. CI adds `--restart`, which restarts the fake Ollama through each agent out of dry run. That stops every `ollama.exe` you run, so it skips itself when another Ollama is running. When you port a route, add its cases there.
+It runs both agents on the same log files, in dry run, with a fake Ollama (a server and one model runner) for `/stats` to find, and compares their answers. `/stats` changes between calls, so it's compared by fields and types, plus the values that hold still. `PUT /env` writes your real user variables: the test only writes names starting with `OLLAMA_PADDOCK_TEST`, `PADDOCK_TEST` or `CUDA_PADDOCK_TEST`, removes them afterwards, and skips its writes when you have other Ollama variables. CI adds `--restart`, which restarts the fake Ollama through each agent out of dry run. That stops every `ollama.exe` you run, so it skips itself when another Ollama is running.
+
+As a service, the agent runs as SYSTEM and reaches your session through the tray app (`tray/`), which serves a named pipe that only you and SYSTEM can open. `--tray` runs the agent that way without installing it (`PADDOCK_AGENT_MODE=helper`, the tray app with `--allow-same-user`), with and without the tray app. CI also installs the real service and runs `test/service.ps1`; that needs an administrator and stops every `ollama.exe`, so don't run it on your own PC. When you port a route, add its cases there.
 
 ### Testing with the dashboard
 

@@ -5,13 +5,19 @@
  * /requests' until when it is "now"). /stats changes with every call, so it has to match in fields
  * and types, and in the values that hold still. Windows only; plain Node, no dependencies.
  *
- *   node test/compare.mjs <C# agent: paddock-agent.exe, or paddock-agent.dll to run with dotnet> [fake ollama.exe] [--restart]
+ *   node test/compare.mjs <C# agent: paddock-agent.exe, or paddock-agent.dll to run with dotnet> [fake ollama.exe]
+ *     [--tray=<paddock-agent-tray.exe>] [--restart]
  *
  * The fake Ollama (test/fake-ollama) gives /stats a server and a model runner to find.
  *
  * --restart also restarts the fake Ollama through each agent, out of dry run. That stops every
  * ollama.exe of the current user, so it only runs when no other Ollama is running, and it sets the
  * user's OLLAMA_HOST for the time it runs (only when that isn't set already). CI passes it.
+ *
+ * --tray also runs the C# agent the way the service does (PADDOCK_AGENT_MODE=helper: the user's
+ * files and variables read as another account would, work in the session through the tray app)
+ * and checks it with and without the tray app. Neither runs as SYSTEM here, so the tray app gets
+ * --allow-same-user; test/service.ps1 covers the real service.
  *
  * PUT /env writes the current user's real variables (HKCU\Environment). The test only writes names
  * starting with OLLAMA_PADDOCK_TEST, PADDOCK_TEST or CUDA_PADDOCK_TEST, removes them afterwards, and
@@ -32,11 +38,15 @@ const TOKEN = "compare-token";
 const NODE_PORT = 11541, CS_PORT = 11542, FAKE_OLLAMA_HOST = "127.0.0.1:11545";
 // the pair that really restarts Ollama
 const NODE_LIVE_PORT = 11543, CS_LIVE_PORT = 11544;
+// the C# agent in helper mode: in dry run, and out of it
+const HELPER_PORT = 11547, HELPER_LIVE_PORT = 11548;
+const NO_HELPER = { status: 409, body: { detail: "sign in on the PC: Ollama runs in your session" } };
 
 const positional = process.argv.slice(2).filter((a) => !a.startsWith("--"));
 const csharp = positional[0];
 const fakeOllama = positional[1];
 const withRestart = process.argv.includes("--restart");
+const trayExe = process.argv.find((a) => a.startsWith("--tray="))?.slice("--tray=".length);
 if (!csharp) {
   console.error("usage: node test/compare.mjs <paddock-agent.exe | paddock-agent.dll>");
   process.exit(2);
@@ -388,11 +398,102 @@ async function checkRestart(csCmd, csArgs) {
       results.push(r);
     }
     record("restart", "POST /service/restart: both answer the same", firstDifference(results[0].body, results[1].body));
+    if (tray) await checkHelperRestart();
   } finally {
     reg("delete", "HKCU\\Environment", "/v", "OLLAMA_HOST", "/f");
     // the restarted fake isn't a child of ours
     try { execFileSync("taskkill", ["/IM", "ollama.exe", "/F", "/T"], { stdio: "ignore" }); } catch { /* none left */ }
   }
+}
+
+// ------------------------------------------------------------------ helper mode
+const mySid = () => execFileSync("whoami", ["/user", "/fo", "csv", "/nh"], { encoding: "utf8" }).trim().split(",")[1].replace(/"/g, "");
+const helperEnv = (live) => ({
+  PADDOCK_AGENT_MODE: "helper",
+  PADDOCK_OLLAMA_USER_SID: mySid(),
+  ...(live ? { PADDOCK_DRY_RUN: "", PADDOCK_OLLAMA_APP: path.join(path.dirname(path.resolve(fakeOllama ?? ".")), "ollama app.exe") } : {}),
+});
+let tray = null;
+function startTray(allowSameUser = true) {
+  tray = spawn(trayExe, ["--headless", ...(allowSameUser ? ["--allow-same-user"] : [])], { stdio: "ignore", windowsHide: true });
+  agents.push(tray);
+  return tray;
+}
+/** Until the tray app serves its pipe: a PUT that changes nothing answers 200 instead of 409. */
+async function waitForTray(port) {
+  const probe = put({ vars: { ...(await call(port, { path: "/env", headers: auth })).body.managed }, restart: false });
+  for (let i = 0; i < 40; i++) {
+    if ((await call(port, probe)).status === 200) return true;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return false;
+}
+const same = (label, what, a, b) => record(label, what, a.status !== b.status ? `status ${a.status} vs ${b.status} (${JSON.stringify(a.body)} / ${JSON.stringify(b.body)})` : firstDifference(a.body, b.body));
+
+async function checkHelper(csCmd, csArgs) {
+  start("csharp-helper", csCmd, csArgs, HELPER_PORT, helperEnv(false));
+  start("csharp-helper-live", csCmd, csArgs, HELPER_LIVE_PORT, helperEnv(true));
+  await waitHealthy(HELPER_PORT, "csharp-helper");
+  await waitHealthy(HELPER_LIVE_PORT, "csharp-helper-live");
+  const get = { path: "/env", headers: auth };
+  const ask = { label: "helper, no tray app" };
+  try {
+    resetEnv();
+    // the user's variables, read from HKEY_USERS\<SID> as the service reads them
+    same(ask.label, "GET /env as Node reads it", await call(NODE_PORT, get), await call(HELPER_PORT, get));
+    // without the tray app nothing changes: no variables written, no Ollama stopped
+    const write = put({ vars: { ...(await call(NODE_PORT, get)).body.managed, OLLAMA_PADDOCK_TEST_A: "1" }, restart: false });
+    same(ask.label, "PUT /env", NO_HELPER, await call(HELPER_PORT, write));
+    record(ask.label, "PUT /env wrote nothing", userVarNames().includes("OLLAMA_PADDOCK_TEST_A") ? "OLLAMA_PADDOCK_TEST_A was written" : null);
+    same(ask.label, "POST /service/restart in dry run", { status: 200, body: { ok: true, dry_run: true } }, await call(HELPER_PORT, { method: "POST", path: "/service/restart", headers: auth }));
+    const before = pidsOf("ollama.exe").sort();
+    same(ask.label, "POST /service/restart", NO_HELPER, await call(HELPER_LIVE_PORT, { method: "POST", path: "/service/restart", headers: auth }));
+    record(ask.label, "POST /service/restart stopped nothing", firstDifference(before, pidsOf("ollama.exe").sort()));
+
+    // a tray app serves only the service (SYSTEM), not the user's own programs such as this agent
+    const strict = startTray(false);
+    await new Promise((r) => setTimeout(r, 3000));
+    same("helper, tray app for SYSTEM only", "PUT /env", NO_HELPER, await call(HELPER_PORT, write));
+    execFileSync("taskkill", ["/PID", String(strict.pid), "/F"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 500));
+
+    startTray();
+    const label = "helper, tray app";
+    if (!(await waitForTray(HELPER_PORT))) {
+      record(label, "the tray app serves its pipe", "no answer within 10 s");
+      return;
+    }
+    // the same write through Node, then through the helper, from the same start
+    const results = [];
+    for (const port of [NODE_PORT, HELPER_PORT]) {
+      resetEnv();
+      const body = put({ vars: { ...(await call(NODE_PORT, get)).body.managed, OLLAMA_PADDOCK_TEST_A: "1", PADDOCK_TEST_CUSTOM: "x" } });
+      results.push({ res: await call(port, body), after: (await call(NODE_PORT, get)).body, state: readState() });
+    }
+    same(label, "PUT /env", results[0].res, results[1].res);
+    record(label, "PUT /env: variables afterwards", firstDifference(results[0].after, results[1].after) ?? firstDifference(results[0].state, results[1].state));
+  } finally {
+    resetEnv(false);
+  }
+}
+
+/** With --restart: the tray app starts the fake Ollama, so it runs as the user and is the tray app's child. */
+async function checkHelperRestart() {
+  const label = "helper restart";
+  const before = pidsOf("ollama.exe");
+  const r = await call(HELPER_LIVE_PORT, { method: "POST", path: "/service/restart", headers: auth });
+  const procs = execFileSync("powershell.exe", ["-NoProfile", "-Command",
+    "Get-CimInstance Win32_Process -Filter \"Name='ollama.exe'\" | % { \"$($_.ProcessId) $($_.ParentProcessId) $($_.CommandLine)\" }"], { encoding: "utf8" })
+    .trim().split(/\r?\n/).filter(Boolean).map((l) => l.trim().split(/\s+/));
+  const server = procs.find((p) => / serve$/.test(p.slice(2).join(" ")));
+  const problems = [
+    r.status !== 200 && `status ${r.status} ${JSON.stringify(r.body)}`,
+    r.body?.ok !== true && `not ok: ${JSON.stringify(r.body)}`,
+    before.some((p) => procs.some(([pid]) => Number(pid) === p)) && "old ollama.exe still running",
+    !server && "no ollama.exe serve running",
+    server && Number(server[1]) !== tray?.pid && `ollama.exe serve was started by ${server[1]}, not the tray app (${tray?.pid})`,
+  ].filter(Boolean);
+  record(label, "POST /service/restart through the tray app", problems.join("; ") || null);
 }
 
 let failed = 0, passed = 0;
@@ -464,6 +565,7 @@ try {
   } finally {
     resetEnv(false);
   }
+  if (trayExe) await checkHelper(csCmd, csArgs);
   if (withRestart && fakeOllama) await checkRestart(csCmd, csArgs);
   for (const [label, setup] of fixtures) {
     setup();

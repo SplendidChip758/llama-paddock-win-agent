@@ -14,8 +14,8 @@ public enum LaunchKind
 
 /// <summary>
 /// What to start, and the Ollama variables it should see: the PC's and the user's, read just now.
-/// The launcher replaces any Ollama variables in its own environment with them (IsManaged with
-/// CustomKeys), so a change made since it started counts.
+/// The launcher replaces any Ollama variables in its own environment with them (OllamaNames.IsManaged
+/// with CustomKeys), so a change made since it started counts.
 /// </summary>
 public sealed record LaunchRequest(LaunchKind Kind, string Exe, Dictionary<string, string> Vars, List<string> CustomKeys);
 
@@ -50,7 +50,7 @@ public static class Launcher
         foreach (DictionaryEntry e in System.Environment.GetEnvironmentVariables())
         {
             var k = (string)e.Key;
-            if (!Env.IsManaged(k, r.CustomKeys)) env[k] = e.Value as string ?? "";
+            if (!OllamaNames.IsManaged(k, r.CustomKeys)) env[k] = e.Value as string ?? "";
         }
         foreach (var (k, v) in r.Vars) env[k] = v;
         return env;

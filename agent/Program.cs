@@ -50,7 +50,9 @@ var json = new JsonSerializerOptions { PropertyNamingPolicy = null, Encoder = Ja
 
 // A service runs as another account, so it reaches the Ollama user's session through the tray app;
 // started any other way, the agent is that user.
-IUserSession session = WindowsServiceHelpers.IsWindowsService() ? new HelperSession(cfg) : new InProcessSession(cfg);
+// PADDOCK_AGENT_MODE=helper uses the tray app without being a service, for tests.
+IUserSession session = WindowsServiceHelpers.IsWindowsService() || cfg.Get("PADDOCK_AGENT_MODE") == "helper"
+    ? new HelperSession(cfg) : new InProcessSession(cfg);
 var routes = new Api(cfg, session, fingerprint).Routes;
 
 Task Send(HttpContext ctx, int status, object body)

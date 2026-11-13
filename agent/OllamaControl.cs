@@ -17,7 +17,7 @@ public sealed partial class OllamaControl(AgentConfig cfg, IUserSession session,
         if (cfg.DryRun) return new { ok = true, dry_run = true };
         var user = session.RequireUser();
         // never stop an Ollama that can't be started again
-        if (!session.CanLaunch) throw HttpError.NoHelper();
+        if (!await session.Ready(ct)) throw HttpError.NoHelper();
         var (vars, customKeys) = env.OllamaVariables(user);
 
         Stop(user.Sid);

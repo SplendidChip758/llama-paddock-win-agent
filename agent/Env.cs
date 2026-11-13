@@ -5,7 +5,7 @@ namespace LlamaPaddock.Agent;
 
 /// <summary>
 /// GET and PUT /env: the Ollama user's own environment variables, which Ollama for Windows reads.
-/// Only variables that look like Ollama's (ManagedName) or that were added through the dashboard
+/// Only variables that look like Ollama's (OllamaNames) or that were added through the dashboard
 /// are ever shown, never Path, TEMP and the like, and only allowed ones can be changed.
 /// </summary>
 public sealed class Env(AgentConfig cfg, IUserSession session)
@@ -30,19 +30,6 @@ public sealed class Env(AgentConfig cfg, IUserSession session)
     public bool Allowed(string name) => Allow.Any(p => p.EndsWith('*')
         ? name.ToUpperInvariant().StartsWith(p[..^1].ToUpperInvariant(), StringComparison.Ordinal)
         : name.ToUpperInvariant() == p.ToUpperInvariant());
-
-    // /^(OLLAMA_|CUDA_|HIP_|ROCR_|HSA_|GGML_|GPU_DEVICE_ORDINAL$)/i, upper-casing A-Z only as JavaScript's /i does here
-    static bool ManagedName(string key)
-    {
-        var up = string.Create(key.Length, key, (span, src) =>
-        {
-            for (int i = 0; i < src.Length; i++) span[i] = src[i] is >= 'a' and <= 'z' ? (char)(src[i] - 32) : src[i];
-        });
-        return up == "GPU_DEVICE_ORDINAL" || new[] { "OLLAMA_", "CUDA_", "HIP_", "ROCR_", "HSA_", "GGML_" }.Any(p => up.StartsWith(p, StringComparison.Ordinal));
-    }
-
-    public static bool IsManaged(string key, List<string> customKeys) =>
-        ManagedName(key) || customKeys.Any(k => k.ToLowerInvariant() == key.ToLowerInvariant());
 
     // agent-state.json: the variables added through the dashboard that don't look like Ollama's
     JsonObject LoadState()
@@ -79,7 +66,7 @@ public sealed class Env(AgentConfig cfg, IUserSession session)
         var customKeys = CustomKeys(LoadState());
         var vars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var scope in new[] { user.MachineVariables(), user.UserVariables() ?? throw HttpError.NotSignedIn() })
-            foreach (var (k, v) in scope) if (IsManaged(k, customKeys)) vars[k] = v;
+            foreach (var (k, v) in scope) if (OllamaNames.IsManaged(k, customKeys)) vars[k] = v;
         return (vars, customKeys);
     }
 
@@ -90,8 +77,8 @@ public sealed class Env(AgentConfig cfg, IUserSession session)
         var machineVars = user.MachineVariables();
         var customKeys = CustomKeys(LoadState());
         // names as written; the user's and the PC's can differ in case, and the Node agent kept both
-        var managed = userVars.Where(e => IsManaged(e.Key, customKeys)).ToDictionary(StringComparer.Ordinal);
-        var machineManaged = machineVars.Where(e => IsManaged(e.Key, customKeys)).ToDictionary(StringComparer.Ordinal);
+        var managed = userVars.Where(e => OllamaNames.IsManaged(e.Key, customKeys)).ToDictionary(StringComparer.Ordinal);
+        var machineManaged = machineVars.Where(e => OllamaNames.IsManaged(e.Key, customKeys)).ToDictionary(StringComparer.Ordinal);
         var external = machineManaged.Where(e => !managed.ContainsKey(e.Key)).ToDictionary(StringComparer.Ordinal);
         var effective = new Dictionary<string, string>(machineManaged, StringComparer.Ordinal);
         foreach (var (k, v) in managed) effective[k] = v;
@@ -117,6 +104,9 @@ public sealed class Env(AgentConfig cfg, IUserSession session)
                 throw new HttpError(400, $"{k} is not an Ollama variable; add it to PADDOCK_AGENT_ENV_ALLOW on the host to manage it here");
         }
 
+        // announcing the change needs the session: without it, change nothing
+        if (!await session.Ready(ct)) throw HttpError.NoHelper();
+
         var state = LoadState();
         // set the allowed vars given and remove the allowed ones that were dropped; anything outside
         // the allowlist stays exactly as it is, whether or not the request mentions it
@@ -124,8 +114,8 @@ public sealed class Env(AgentConfig cfg, IUserSession session)
         foreach (var (k, v) in entries) if (Allowed(k)) changes[k] = v.GetString();
         foreach (var k in before.managed.Keys)
             if (!entries.Any(e => e.Key.Equals(k, StringComparison.OrdinalIgnoreCase)) && Allowed(k)) changes[k] = null;
-        state["customKeys"] = new JsonArray(changes.Where(c => c.Value is not null && !ManagedName(c.Key)).Select(c => c.Key)
-            .Concat(before.managed.Keys.Where(k => !Allowed(k) && !ManagedName(k)))
+        state["customKeys"] = new JsonArray(changes.Where(c => c.Value is not null && !OllamaNames.IsOllamaName(c.Key)).Select(c => c.Key)
+            .Concat(before.managed.Keys.Where(k => !Allowed(k) && !OllamaNames.IsOllamaName(k)))
             .Distinct(StringComparer.Ordinal).Select(k => (JsonNode)JsonValue.Create(k)!).ToArray());
 
         // An unchanged value isn't written again, so one stored as %VAR% stays that way. An empty one
