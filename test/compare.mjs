@@ -2,14 +2,17 @@
 /**
  * Runs the Node agent and the C# agent side by side on the same files and checks that they answer
  * the same: status and JSON body, apart from fields that change between calls (ts, version, and
- * /requests' until when it is "now"). Windows only; plain Node, no dependencies.
+ * /requests' until when it is "now"). /stats changes with every call, so it has to match in fields
+ * and types, and in the values that hold still. Windows only; plain Node, no dependencies.
  *
- *   node test/compare.mjs <C# agent: paddock-agent.exe, or paddock-agent.dll to run with dotnet>
+ *   node test/compare.mjs <C# agent: paddock-agent.exe, or paddock-agent.dll to run with dotnet> [fake ollama.exe]
+ *
+ * The fake Ollama (test/fake-ollama) gives /stats a server and a model runner to find.
  *
  * Both agents run in-process as the current user, in dry run, with LOCALAPPDATA pointing at a
  * folder of log fixtures that the cases below rewrite.
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -18,9 +21,10 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN = "compare-token";
-const NODE_PORT = 11541, CS_PORT = 11542;
+const NODE_PORT = 11541, CS_PORT = 11542, FAKE_OLLAMA_HOST = "127.0.0.1:11545";
 
 const csharp = process.argv[2];
+const fakeOllama = process.argv[3];
 if (!csharp) {
   console.error("usage: node test/compare.mjs <paddock-agent.exe | paddock-agent.dll>");
   process.exit(2);
@@ -61,7 +65,10 @@ async function waitHealthy(port, name) {
   throw new Error(`${name} agent didn't start`);
 }
 function stopAll() {
-  for (const a of agents) a.kill();
+  // with /T: the fake Ollama's model runner goes too
+  for (const a of agents.splice(0)) {
+    try { execFileSync("taskkill", ["/PID", String(a.pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* already gone */ }
+  }
 }
 process.on("exit", stopAll);
 
@@ -197,11 +204,49 @@ const general = [
   { path: "/gpu/reload-uvm", headers: auth },
   { method: "POST", path: "/gpu/reload-uvm", headers: auth },
   { method: "POST", path: "/gpu/reload-uvm", headers: {} },
+  // the first /stats has no network rate yet, the second has
+  { path: "/stats", headers: auth },
+  { path: "/stats", headers: auth },
+  { path: "/stats", headers: {} },
 ];
+
+/** A value's shape: each number, string or boolean replaced by its type. */
+function typed(v) {
+  if (v === null) return null;
+  if (Array.isArray(v)) return v.map(typed);
+  if (typeof v === "object") return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, typed(x)]));
+  return typeof v;
+}
+
+/** /stats as its shape, plus the values that hold still between two calls. */
+function statsView(b) {
+  const t = typed(b);
+  delete t.ts;
+  Object.assign(t, { protocol: b.protocol, platform: b.platform, fingerprint: b.fingerprint, service: b.service });
+  const s = b.system;
+  Object.assign(t.system, { hostname: s.hostname, cpu_count: s.cpu_count, load: s.load, swap: s.swap });
+  t.system.mem.total = s.mem.total;
+  // both agents tell drives apart by size and used space, so a busy drive that changes between two
+  // reads can be listed twice: one per size is compared
+  const bySize = new Map(s.disks.map((d) => [d.total, d]).reverse());
+  t.system.disks = [...bySize.values()].reverse().map((d) => ({ ...typed(d), path: d.path, total: d.total }));
+  if (s.ollama_process) Object.assign(t.system.ollama_process, { pid: s.ollama_process.pid, runners: s.ollama_process.runners });
+  t.nvidia.available = b.nvidia.available;
+  if ("error" in b.nvidia) t.nvidia.error = b.nvidia.error;
+  t.nvidia.gpus = b.nvidia.gpus.map((g) => ({ ...typed(g), index: g.index, uuid: g.uuid, name: g.name, driver: g.driver }));
+  return t;
+}
+
+/** llama-server.exe processes now running: the Node agent on dev doesn't count them as runners yet. */
+async function llamaServers() {
+  const out = execFileSync("tasklist", ["/FO", "CSV", "/NH", "/FI", "IMAGENAME eq llama-server.exe"], { encoding: "utf8" });
+  return out.split(/\r?\n/).filter((l) => l.toLowerCase().startsWith('"llama-server.exe"')).length;
+}
 
 // fields that change between calls
 function stable(route, body) {
   if (!body || typeof body !== "object") return body;
+  if (route === "/stats" && body.system) return statsView(body);
   const { ts: _ts, ...rest } = body;
   if (route === "/health") delete rest.version;
   if (route === "/requests" && rest.more === false) delete rest.until;
@@ -231,6 +276,7 @@ function firstDifference(a, b, at = "") {
 let failed = 0, passed = 0;
 async function check(label, c) {
   const [n, s] = await Promise.all([call(NODE_PORT, c), call(CS_PORT, c)]);
+  if (n.body?.system?.ollama_process) n.body.system.ollama_process.runners += await llamaServers();
   const diff = n.status !== s.status ? `status: node ${n.status}, c# ${s.status}` : firstDifference(n.body, s.body);
   if (diff) {
     failed++;
@@ -240,6 +286,14 @@ async function check(label, c) {
 
 try {
   const [csCmd, csArgs] = csharp.endsWith(".dll") ? ["dotnet", [csharp]] : [csharp, []];
+  if (fakeOllama) {
+    const out = fs.openSync(path.join(tmp, "fake-ollama.log"), "w");
+    agents.push(spawn(fakeOllama, ["serve"], { env: { ...env, OLLAMA_HOST: FAKE_OLLAMA_HOST }, stdio: ["ignore", out, out], windowsHide: true }));
+    for (let i = 0; i < 40; i++) {
+      try { if ((await fetch(`http://${FAKE_OLLAMA_HOST}/api/version`)).ok) break; } catch { /* starting */ }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
   start("node", process.execPath, [path.join(ROOT, "paddock-agent.mjs")], NODE_PORT);
   // the Node agent makes the key first; the C# agent then loads the same one
   await waitHealthy(NODE_PORT, "node");

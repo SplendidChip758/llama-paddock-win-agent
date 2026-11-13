@@ -30,10 +30,11 @@ The C# agent in `agent/` is replacing the Node agent, so the two have to answer 
 
 ```bash
 dotnet build agent -c Release
-node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe
+dotnet build test/fake-ollama -c Release -o "$TEMP/fake-ollama"
+node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$TEMP/fake-ollama/ollama.exe"
 ```
 
-It runs both agents on the same log files, in dry run, and compares their answers. When you port a route, add its cases there.
+It runs both agents on the same log files, in dry run, with a fake Ollama (a server and one model runner) for `/stats` to find, and compares their answers. `/stats` changes between calls, so it's compared by fields and types, plus the values that hold still. When you port a route, add its cases there.
 
 ### Testing with the dashboard
 

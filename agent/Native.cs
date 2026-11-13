@@ -53,4 +53,72 @@ static class Native
         const uint WmSettingChange = 0x001A, SmtoAbortIfHung = 0x0002;
         SendMessageTimeout(new IntPtr(0xFFFF), WmSettingChange, UIntPtr.Zero, "Environment", SmtoAbortIfHung, 5000, out _);
     }
+
+    // ---------------------------------------------------------------- stats
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessorPerformance
+    {
+        public long Idle, Kernel, User, Dpc, Interrupt;
+        public uint InterruptCount;
+    }
+
+    [DllImport("ntdll.dll")]
+    static extern int NtQuerySystemInformation(int cls, [Out] ProcessorPerformance[] info, int length, out int returned);
+
+    public readonly record struct CpuTimes(long User, long Sys, long Idle, long Irq)
+    {
+        public long Total => User + Sys + Idle + Irq;
+    }
+
+    /// <summary>Each core's times in milliseconds, as Node's os.cpus() reads them (libuv: the same call, the same sums).</summary>
+    public static CpuTimes[] CpuTimesPerCore()
+    {
+        var info = new ProcessorPerformance[Math.Max(Environment.ProcessorCount, 1) * 2];
+        int status = NtQuerySystemInformation(8 /* SystemProcessorPerformanceInformation */, info, info.Length * Marshal.SizeOf<ProcessorPerformance>(), out int returned);
+        if (status != 0) return [];
+        int count = returned / Marshal.SizeOf<ProcessorPerformance>();
+        var times = new CpuTimes[count];
+        // 100 ns units to whole milliseconds; kernel time includes idle time
+        for (int i = 0; i < count; i++)
+            times[i] = new CpuTimes(info[i].User / 10000, (info[i].Kernel - info[i].Idle) / 10000, info[i].Idle / 10000, info[i].Interrupt / 10000);
+        return times;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct MemoryStatusEx
+    {
+        public uint Length, MemoryLoad;
+        public ulong TotalPhys, AvailPhys, TotalPageFile, AvailPageFile, TotalVirtual, AvailVirtual, AvailExtendedVirtual;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx status);
+
+    /// <summary>Physical memory and what's available of it: Node's os.totalmem() and os.freemem().</summary>
+    public static (long Total, long Available) Memory()
+    {
+        var s = new MemoryStatusEx { Length = (uint)Marshal.SizeOf<MemoryStatusEx>() };
+        return GlobalMemoryStatusEx(ref s) ? ((long)s.TotalPhys, (long)s.AvailPhys) : (0, 0);
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool GetDiskFreeSpaceW(string path, out uint sectorsPerCluster, out uint bytesPerSector, out uint freeClusters, out uint totalClusters);
+
+    /// <summary>
+    /// A drive's size and free space in whole clusters, as Node's fs.statfsSync() gives them; null when
+    /// the path can't be read. A file's folder is used, as libuv does.
+    /// </summary>
+    public static (long Total, long Free)? DiskSpace(string path)
+    {
+        if (!GetDiskFreeSpaceW(path, out var spc, out var bps, out var free, out var total))
+        {
+            const int ErrorDirectory = 267;
+            if (Marshal.GetLastWin32Error() != ErrorDirectory || Path.GetDirectoryName(Path.GetFullPath(path)) is not { } dir
+                || !GetDiskFreeSpaceW(dir + "\\", out spc, out bps, out free, out total))
+                return null;
+        }
+        long cluster = (long)spc * bps;
+        return (total * cluster, free * cluster);
+    }
 }

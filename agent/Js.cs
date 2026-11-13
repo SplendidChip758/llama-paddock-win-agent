@@ -35,6 +35,29 @@ public static partial class Js
         return x - r >= 0.5 ? r + 1 : r;
     }
 
+    /// <summary>
+    /// <c>+x.toFixed(1)</c>: rounded on the double's exact value, halves away from zero. Math.Round
+    /// scales first and can round 0.15 (really 0.1499…) up.
+    /// </summary>
+    public static double Fixed1(double x)
+    {
+        if (!double.IsFinite(x) || Math.Abs(x) >= 1e21) return x;
+        long bits = BitConverter.DoubleToInt64Bits(Math.Abs(x));
+        int exp = (int)((bits >> 52) & 0x7FF);
+        long mantissa = bits & 0xFFFFFFFFFFFFFL;
+        if (exp == 0) exp++; else mantissa |= 1L << 52;
+        exp -= 1075; // |x| = mantissa * 2^exp
+        System.Numerics.BigInteger n;
+        if (exp >= 0) n = (System.Numerics.BigInteger)mantissa * 10 << exp;
+        else
+        {
+            var den = System.Numerics.BigInteger.One << -exp;
+            n = ((System.Numerics.BigInteger)mantissa * 20 + den) / (den * 2);
+        }
+        double r = (double)n / 10;
+        return x < 0 ? -r : r;
+    }
+
     /// <summary><c>s.split(/\r?\n/)</c>.</summary>
     public static List<string> SplitLines(string s)
     {

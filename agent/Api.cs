@@ -20,13 +20,17 @@ public sealed class Api
 
     public IReadOnlyDictionary<string, Func<HttpContext, Task<object>>> Routes { get; }
 
-    public Api(IUserSession session, string? fingerprint)
+    readonly Stats stats;
+
+    public Api(AgentConfig cfg, IUserSession session, string? fingerprint)
     {
         this.session = session;
         this.fingerprint = fingerprint;
+        stats = new Stats(cfg, session, hostname);
         Routes = new Dictionary<string, Func<HttpContext, Task<object>>>
         {
             ["GET /health"] = _ => Done(new { ok = true, version = Version, protocol = Protocol, platform = "windows", hostname, fingerprint }),
+            ["GET /stats"] = _ => stats.Get(Version, Protocol, fingerprint),
             ["GET /logs"] = ctx =>
             {
                 // slice() drops the fraction of a number like 15.5

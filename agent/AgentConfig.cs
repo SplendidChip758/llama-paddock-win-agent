@@ -57,4 +57,6 @@ public sealed class AgentConfig
     /// The service runs as another account, so it can't use its own.
     /// </summary>
     public string OllamaUserSid => Get("PADDOCK_OLLAMA_USER_SID");
+    /// <summary>Drives or folders to report besides the system drive and the models folder, comma separated.</summary>
+    public string[] DiskPaths => Get("PADDOCK_DISK_PATHS").Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
 }
