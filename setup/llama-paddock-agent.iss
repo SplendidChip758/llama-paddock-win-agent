@@ -95,11 +95,12 @@ function InitializeSetup(): Boolean;
 var
   F, Users: String;
 begin
-  // the agent needs the runtime next to it, so detect runs from a copy of the program folder in
-  // {tmp}. The pattern is matched against the entries' DestDir as written, constants unexpanded.
+  // the agent needs the runtime next to it, so detect runs from a copy of the program folder. The
+  // pattern is matched against the entries' DestDir as written, and the copy keeps that path:
+  // {tmp}\{app}\, with "{app}" a folder name
   ExtractTemporaryFiles('{app}\*');
   F := ExpandConstant('{tmp}\detect.ini');
-  Agent('detect', F, ExpandConstant('{tmp}'));
+  if not Agent('detect', F, ExpandConstant('{tmp}') + '\{app}') then Log('detect failed: ' + Res('error', F));
   Installed := Res('installed', F) = '1';
   Legacy := Res('legacy', F);
   DetectedUser := Res('user', F);
@@ -170,7 +171,8 @@ var
   Port: Integer;
 begin
   Result := True;
-  if (CurPageID = UserPage.ID) and (UserSids.Count = 0) then begin
+  // the installer also finds the user from the Node.js agent's folder, or takes /OLLAMAUSER
+  if (CurPageID = UserPage.ID) and (UserSids.Count = 0) and (Legacy = '') and (ExpandConstant('{param:OLLAMAUSER}') = '') then begin
     MsgBox('Ollama isn''t installed for any user on this PC. Install it from https://ollama.com and start it once, then run this setup again.', mbError, MB_OK);
     Result := False;
   end else if CurPageID = NetworkPage.ID then begin

@@ -83,7 +83,8 @@ try {
   Check 'the service answers' ($h.ok -and $h.version -ne '0.10.0-dev.1') ($h | ConvertTo-Json)
   Check 'the HTTPS key came along' ($h.fingerprint -eq $fingerprint) "$($h.fingerprint) vs $fingerprint"
   Check 'the token came along' ((Agent GET /env).Status -eq 200)
-  Check 'the Ollama user is recorded' ((Get-Content -Raw (Join-Path $data 'agent.json') | ConvertFrom-Json).PADDOCK_OLLAMA_USER_SID -eq $sid)
+  $agentJson = Join-Path $data 'agent.json'
+  Check 'the Ollama user is recorded' ((Test-Path $agentJson) -and (Get-Content -Raw $agentJson | ConvertFrom-Json).PADDOCK_OLLAMA_USER_SID -eq $sid)
   Check 'the scheduled task is gone' (-not (Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue))
   Check 'the Node agent is gone' (-not (Test-Path $legacy) -and -not (Get-CimInstance Win32_Process -Filter "Name='node.exe'" | Where-Object CommandLine -like '*paddock-agent.mjs*'))
   Check 'the service runs as LocalSystem' ((Get-CimInstance Win32_Service -Filter "Name='$name'").StartName -eq 'LocalSystem')
