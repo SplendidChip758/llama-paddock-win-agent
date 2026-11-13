@@ -6,27 +6,19 @@ Issues and the roadmap live in llama-paddock, on one tracker and one project. Op
 
 ## Local development
 
-The agent is one file of plain Node.js (18.15+) with no dependencies. Run it without touching Ollama:
+The agent (`agent/`) and its tray app (`tray/`) are .NET 10 programs; you need the .NET 10 SDK on Windows. Run the agent from your own account, without touching Ollama:
 
 ```powershell
-$env:PADDOCK_AGENT_TOKEN = "test"; $env:PADDOCK_DRY_RUN = "1"
-$env:PADDOCK_AGENT_TLS_KEY = "$env:TEMP\agent.key"; $env:PADDOCK_AGENT_TLS_CERT = "$env:TEMP\agent.crt"
-node paddock-agent.mjs
+$env:PADDOCK_AGENT_DATA = "$env:TEMP\paddock-dev"; $env:PADDOCK_AGENT_TOKEN = "test"; $env:PADDOCK_DRY_RUN = "1"
+dotnet run --project agent
 curl.exe -H "Authorization: Bearer test" localhost:11435/stats
 ```
 
-`PADDOCK_DRY_RUN=1` never kills or starts Ollama. The agent also starts on Linux or macOS, which is enough to check routes and shapes, but the stats and Ollama control only mean something on Windows.
+Started that way, the agent is the Ollama user itself, as in Visual Studio. Installed, it runs as a LocalSystem service and reaches the Ollama user's session through the tray app, which serves a named pipe that only that user and SYSTEM can open. `PADDOCK_DRY_RUN=1` never stops or starts Ollama.
 
-Before pushing, run what CI runs:
+### Tests
 
-```bash
-node --check paddock-agent.mjs
-bash -n .github/scripts/prepare-release.sh
-```
-
-CI also parses `install.ps1` and `uninstall.ps1` with PowerShell and starts the agent on a Windows runner.
-
-The C# agent in `agent/` is replacing the Node agent, so the two have to answer the same. On Windows, with the .NET 10 SDK and Node:
+The C# agent replaced the Node.js agent, which stays in `test/legacy/` as the reference: the two have to answer the same. With the .NET 10 SDK and Node:
 
 ```bash
 dotnet build agent -c Release
@@ -36,9 +28,11 @@ node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$TEMP
   --tray=tray/bin/Release/net10.0-windows/paddock-agent-tray.exe
 ```
 
-It runs both agents on the same log files, in dry run, with a fake Ollama (a server and one model runner) for `/stats` to find, and compares their answers. `/stats` changes between calls, so it's compared by fields and types, plus the values that hold still. `PUT /env` writes your real user variables: the test only writes names starting with `OLLAMA_PADDOCK_TEST`, `PADDOCK_TEST` or `CUDA_PADDOCK_TEST`, removes them afterwards, and skips its writes when you have other Ollama variables. CI adds `--restart`, which restarts the fake Ollama through each agent out of dry run. That stops every `ollama.exe` you run, so it skips itself when another Ollama is running.
+It runs both agents on the same log files, in dry run, with a fake Ollama (a server and one model runner) for `/stats` to find, and compares their answers. `/stats` changes between calls, so it's compared by fields and types, plus the values that hold still. `PUT /env` writes your real user variables: the test only writes names starting with `OLLAMA_PADDOCK_TEST`, `PADDOCK_TEST` or `CUDA_PADDOCK_TEST`, removes them afterwards, and skips its writes when you have other Ollama variables. `--tray` also runs the agent as the service does (`PADDOCK_AGENT_MODE=helper`, the tray app with `--allow-same-user`), with and without the tray app. When you change a route, add its cases there.
 
-As a service, the agent runs as SYSTEM and reaches your session through the tray app (`tray/`), which serves a named pipe that only you and SYSTEM can open. `--tray` runs the agent that way without installing it (`PADDOCK_AGENT_MODE=helper`, the tray app with `--allow-same-user`), with and without the tray app. CI also installs the real service and runs `test/service.ps1`; that needs an administrator and stops every `ollama.exe`, so don't run it on your own PC. When you port a route, add its cases there.
+CI also:
+- adds `--restart`, which restarts the fake Ollama through each agent out of dry run. That stops every `ollama.exe` you run, so it skips itself when another Ollama is running.
+- builds the setup (`.github/scripts/build-setup.ps1`, which needs [Inno Setup 6](https://jrsoftware.org/isinfo.php)) and runs `test/service.ps1`: installed over a running Node.js agent, the service through the tray app, an upgrade and an uninstall. It needs an administrator, installs a service and stops every `ollama.exe`, so don't run it on your own PC. Each CI run keeps the setup it built as an artifact, to try on a spare PC.
 
 ### Testing with the dashboard
 
@@ -55,7 +49,7 @@ Releases are fully automated: semantic-release reads every commit message to pic
 - Conventional Commits: `<type>(<scope>): <summary>`.
 - `feat` bumps the minor version and `fix`/`perf` the patch version. `docs`, `test`, `style`, `refactor`, `build`, `ci` and `chore` don't release.
 - Never mark a change as breaking (`!`, `BREAKING CHANGE:`) unless the maintainer agrees.
-- Never edit `CHANGELOG.md` or `VERSION` in the agent by hand.
+- Never edit `CHANGELOG.md` or the version in the projects by hand: the release build stamps it.
 
 ## Branches and pull requests
 
@@ -63,4 +57,4 @@ Branch from `dev` and open the PR against `dev`; it is squash-merged, so its tit
 
 ## How a release happens
 
-On a push to `main` or `dev` that changes the agent or its installer, the release workflow runs semantic-release (`.releaserc.json`). It stamps the version into the agent, updates `CHANGELOG.md`, tags the commit and publishes a GitHub release with `llama-paddock-agent-windows.zip` (the agent, `install.ps1` and `uninstall.ps1`) and `SHA256SUMS`, which lists the zip and the files in it.
+On a push to `main` or `dev` that changes the agent, the tray app or the setup, the release workflow runs semantic-release (`.releaserc.json`). It updates `CHANGELOG.md`, tags the commit and publishes a GitHub release. A Windows job then builds the setup from the tag, with the version stamped into both programs, and attaches `llama-paddock-agent-setup.exe` and `SHA256SUMS`, which lists the setup and the programs in it.

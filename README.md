@@ -13,8 +13,8 @@
   <a href="https://github.com/SplendidChip758/llama-paddock-win-agent/stargazers"><img alt="Stars" src="https://img.shields.io/github/stars/SplendidChip758/llama-paddock-win-agent?style=flat-square"></a>
   <br>
   <a href="https://ollama.com"><img alt="Ollama" src="https://img.shields.io/badge/Ollama-compatible-151d29?style=flat-square&logo=ollama&logoColor=white"></a>
-  <a href="#llama-paddock-windows-agent"><img alt="Node.js" src="https://img.shields.io/badge/Node.js-%E2%89%A518.15-151d29?style=flat-square&logo=nodedotjs&logoColor=white"></a>
-  <a href="#llama-paddock-windows-agent"><img alt="No dependencies" src="https://img.shields.io/badge/dependencies-none-151d29?style=flat-square"></a>
+  <a href="#llama-paddock-windows-agent"><img alt=".NET 10" src="https://img.shields.io/badge/.NET-10-151d29?style=flat-square&logo=dotnet&logoColor=white"></a>
+  <a href="#install"><img alt="Nothing to install first" src="https://img.shields.io/badge/prerequisites-none-151d29?style=flat-square"></a>
   <a href="#install"><img alt="Platform: Windows" src="https://img.shields.io/badge/host-Windows-151d29?style=flat-square"></a>
   <a href="#versions-and-the-protocol"><img alt="Agent protocol 1" src="https://img.shields.io/badge/protocol-1-151d29?style=flat-square"></a>
 </p>
@@ -32,19 +32,15 @@
 
 The Windows host agent for [llama-paddock](https://github.com/SplendidChip758/llama-paddock), a self-hosted dashboard for a fleet of Ollama hosts. It runs on a Windows PC next to the Ollama desktop app and gives the dashboard what Ollama's own API doesn't: system and GPU stats, Ollama's environment variables, restarting Ollama, its log, and the GPU check.
 
-It runs as a Scheduled Task at logon, in your own session, so it can restart the Ollama tray app. It is one file of plain Node.js (18.15+) with no dependencies, and serves the same HTTP API as the [Linux agent](https://github.com/SplendidChip758/llama-paddock-agent) on port 11435, over HTTPS with its own key and, unless turned off, plain HTTP.
+It runs as a Windows service, so it reports the PC from startup, and leaves Ollama running as it does: the Ollama desktop app in the session of the user who runs it. A small tray app in that session restarts Ollama and applies new settings for the service. Both are .NET 10 programs, with the runtime included. The agent serves the same HTTP API as the [Linux agent](https://github.com/SplendidChip758/llama-paddock-agent) on port 11435, over HTTPS with its own key and, unless turned off, plain HTTP.
 
 ## Install
 
-Download `llama-paddock-agent-windows.zip` from the [latest release](https://github.com/SplendidChip758/llama-paddock-win-agent/releases/latest), unzip it, and run the installer from the account that runs Ollama:
+Download `llama-paddock-agent-setup.exe` from the [latest release](https://github.com/SplendidChip758/llama-paddock-win-agent/releases/latest) and run it. It asks which user runs Ollama, installs the service and the tray app, and shows the agent URL, token and key fingerprint to enter in the dashboard. Over an install of the earlier Node.js agent it keeps the token, the HTTPS key and the settings, so the dashboard needs no change. **Settings > Apps** uninstalls it.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install.ps1
-```
+The [Windows agent docs](https://github.com/SplendidChip758/llama-paddock/blob/main/docs/agent-windows.md) cover the options, silent installs, updating, and adding the PC to the dashboard.
 
-It needs Node.js 18.15 or newer (`winget install OpenJS.NodeJS.LTS`). The [Windows agent docs](https://github.com/SplendidChip758/llama-paddock/blob/main/docs/agent-windows.md) cover the options, updating, and adding the PC to the dashboard. `uninstall.ps1` removes it.
-
-Every release has `llama-paddock-agent-windows.zip` and `SHA256SUMS`, which lists the zip and the files in it. Releases up to 0.10.0-dev.1 also have `paddock-agent-windows.mjs`.
+Every release has `llama-paddock-agent-setup.exe` and `SHA256SUMS`, which lists the setup and the programs in it. Earlier releases had the Node.js agent instead, as `llama-paddock-agent-windows.zip` with `install.ps1`; releases up to 0.10.0-dev.1 also had `paddock-agent-windows.mjs`.
 
 ## Versions and the protocol
 

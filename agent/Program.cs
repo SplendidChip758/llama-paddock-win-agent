@@ -7,8 +7,11 @@ using System.Text.Json;
 using LlamaPaddock.Agent;
 using Microsoft.Extensions.Hosting.WindowsServices;
 
+// install, uninstall, detect, stop: the steps the setup runs
+if (Installer.IsCommand(args)) return Installer.Run(args);
+
 var dataDir = Environment.GetEnvironmentVariable("PADDOCK_AGENT_DATA")
-    ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "llama-paddock-agent");
+    ?? Installer.DataDir;
 var cfg = AgentConfig.Load(dataDir);
 if (cfg.Token == "")
 {

@@ -1,4 +1,5 @@
 using System.Net;
+using System.Reflection;
 
 namespace LlamaPaddock.Agent;
 
@@ -8,7 +9,9 @@ namespace LlamaPaddock.Agent;
 /// </summary>
 public sealed class Api
 {
-    public const string Version = "0.0.0-dev";
+    // stamped by the release build (dotnet publish -p:Version=…)
+    public static readonly string Version = typeof(Api).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "0.0.0-dev";
     // The agent API's protocol, shared with the Linux agent. Unlike Version it only goes up when the API
     // changes in a way older dashboards can't follow, never for fixes or new optional fields.
     public const int Protocol = 1;
