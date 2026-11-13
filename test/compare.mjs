@@ -5,9 +5,13 @@
  * /requests' until when it is "now"). /stats changes with every call, so it has to match in fields
  * and types, and in the values that hold still. Windows only; plain Node, no dependencies.
  *
- *   node test/compare.mjs <C# agent: paddock-agent.exe, or paddock-agent.dll to run with dotnet> [fake ollama.exe]
+ *   node test/compare.mjs <C# agent: paddock-agent.exe, or paddock-agent.dll to run with dotnet> [fake ollama.exe] [--restart]
  *
  * The fake Ollama (test/fake-ollama) gives /stats a server and a model runner to find.
+ *
+ * --restart also restarts the fake Ollama through each agent, out of dry run. That stops every
+ * ollama.exe of the current user, so it only runs when no other Ollama is running, and it sets the
+ * user's OLLAMA_HOST for the time it runs (only when that isn't set already). CI passes it.
  *
  * PUT /env writes the current user's real variables (HKCU\Environment). The test only writes names
  * starting with OLLAMA_PADDOCK_TEST, PADDOCK_TEST or CUDA_PADDOCK_TEST, removes them afterwards, and
@@ -26,9 +30,13 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TOKEN = "compare-token";
 const NODE_PORT = 11541, CS_PORT = 11542, FAKE_OLLAMA_HOST = "127.0.0.1:11545";
+// the pair that really restarts Ollama
+const NODE_LIVE_PORT = 11543, CS_LIVE_PORT = 11544;
 
-const csharp = process.argv[2];
-const fakeOllama = process.argv[3];
+const positional = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const csharp = positional[0];
+const fakeOllama = positional[1];
+const withRestart = process.argv.includes("--restart");
 if (!csharp) {
   console.error("usage: node test/compare.mjs <paddock-agent.exe | paddock-agent.dll>");
   process.exit(2);
@@ -56,9 +64,9 @@ const env = {
 };
 
 const agents = [];
-function start(name, cmd, args, port) {
+function start(name, cmd, args, port, extraEnv = {}) {
   const out = fs.openSync(path.join(tmp, `${name}.log`), "w");
-  const child = spawn(cmd, args, { env: { ...env, PADDOCK_AGENT_PORT: String(port) }, stdio: ["ignore", out, out], windowsHide: true });
+  const child = spawn(cmd, args, { env: { ...env, PADDOCK_AGENT_PORT: String(port), ...extraEnv }, stdio: ["ignore", out, out], windowsHide: true });
   agents.push(child);
   return child;
 }
@@ -216,6 +224,10 @@ const general = [
   { path: "/stats", headers: auth },
   { path: "/stats", headers: auth },
   { path: "/stats", headers: {} },
+  // dry run: never touches Ollama
+  { method: "POST", path: "/service/restart", headers: auth },
+  { path: "/service/restart", headers: auth },
+  { method: "POST", path: "/service/restart", headers: {} },
 ];
 
 /** A value's shape: each number, string or boolean replaced by its type. */
@@ -323,6 +335,66 @@ const envWrites = [
 ];
 const readState = () => JSON.parse(fs.readFileSync(stateFile, "utf8"));
 
+// ------------------------------------------------------------------ restart
+/** PIDs of a process name from tasklist. */
+function pidsOf(image) {
+  const out = execFileSync("tasklist", ["/FO", "CSV", "/NH", "/FI", `IMAGENAME eq ${image}`], { encoding: "utf8" });
+  return out.split(/\r?\n/).filter((l) => l.toLowerCase().startsWith(`"${image}"`)).map((l) => Number(l.split('","')[1]));
+}
+
+async function checkRestart(csCmd, csArgs) {
+  const fakeDir = path.dirname(path.resolve(fakeOllama));
+  const ours = new Set(agents.flatMap((a) => [a.pid]));
+  const others = pidsOf("ollama app.exe").length;
+  if (others || userVarNames().some((n) => n.toUpperCase() === "OLLAMA_HOST")) {
+    console.log("SKIP restart: the Ollama desktop app is running or OLLAMA_HOST is set for this user");
+    return;
+  }
+  // the fake's server and runner are children of ours; any other ollama.exe is a real Ollama
+  const tree = execFileSync("powershell.exe", ["-NoProfile", "-Command",
+    "Get-CimInstance Win32_Process -Filter \"Name='ollama.exe'\" | % { \"$($_.ProcessId) $($_.ParentProcessId)\" }"], { encoding: "utf8" });
+  const procs = tree.trim().split(/\r?\n/).filter(Boolean).map((l) => l.trim().split(/\s+/).map(Number));
+  const fakePids = new Set();
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const [pid, parent] of procs) if (!fakePids.has(pid) && (ours.has(parent) || fakePids.has(parent))) { fakePids.add(pid); changed = true; }
+  }
+  if (procs.some(([pid]) => !fakePids.has(pid))) {
+    console.log("SKIP restart: another Ollama is running, and a restart would stop it");
+    return;
+  }
+
+  reg("add", "HKCU\\Environment", "/v", "OLLAMA_HOST", "/t", "REG_SZ", "/d", FAKE_OLLAMA_HOST, "/f");
+  try {
+    // no desktop app at this path, so both agents run `ollama.exe serve` from its folder
+    const live = { PADDOCK_DRY_RUN: "", PADDOCK_OLLAMA_APP: path.join(fakeDir, "ollama app.exe") };
+    start("node-live", process.execPath, [path.join(data, "paddock-agent.mjs")], NODE_LIVE_PORT, live);
+    start("csharp-live", csCmd, csArgs, CS_LIVE_PORT, live);
+    await waitHealthy(NODE_LIVE_PORT, "node-live");
+    await waitHealthy(CS_LIVE_PORT, "csharp-live");
+    const results = [];
+    for (const [name, port] of [["node", NODE_LIVE_PORT], ["c#", CS_LIVE_PORT]]) {
+      const before = pidsOf("ollama.exe");
+      const r = await call(port, { method: "POST", path: "/service/restart", headers: auth });
+      const after = pidsOf("ollama.exe");
+      const api = await fetch(`http://${FAKE_OLLAMA_HOST}/api/version`).then((x) => x.ok, () => false);
+      const problems = [
+        r.status !== 200 && `status ${r.status} ${JSON.stringify(r.body)}`,
+        before.some((p) => after.includes(p)) && `old ollama.exe still running (${before} → ${after})`,
+        after.length !== 2 && `expected a server and a runner, found ${after.length} ollama.exe`,
+        !api && "the API doesn't answer",
+      ].filter(Boolean);
+      record(`restart by ${name}`, "POST /service/restart", problems.join("; ") || null);
+      results.push(r);
+    }
+    record("restart", "POST /service/restart: both answer the same", firstDifference(results[0].body, results[1].body));
+  } finally {
+    reg("delete", "HKCU\\Environment", "/v", "OLLAMA_HOST", "/f");
+    // the restarted fake isn't a child of ours
+    try { execFileSync("taskkill", ["/IM", "ollama.exe", "/F", "/T"], { stdio: "ignore" }); } catch { /* none left */ }
+  }
+}
+
 let failed = 0, passed = 0;
 function record(label, what, diff) {
   if (diff) {
@@ -392,6 +464,7 @@ try {
   } finally {
     resetEnv(false);
   }
+  if (withRestart && fakeOllama) await checkRestart(csCmd, csArgs);
   for (const [label, setup] of fixtures) {
     setup();
     for (const p of LOG_ROUTES) await check(label, { path: p, headers: auth });

@@ -22,21 +22,22 @@ public sealed class Api
 
     readonly Stats stats;
     readonly Env env;
-    readonly AgentConfig cfg;
+    readonly OllamaControl ollama;
 
     public Api(AgentConfig cfg, IUserSession session, string? fingerprint)
     {
         this.session = session;
         this.fingerprint = fingerprint;
-        this.cfg = cfg;
         stats = new Stats(cfg, session, hostname);
         env = new Env(cfg, session);
+        ollama = new OllamaControl(cfg, session, env);
         Routes = new Dictionary<string, Func<HttpContext, Task<object>>>
         {
             ["GET /health"] = _ => Done(new { ok = true, version = Version, protocol = Protocol, platform = "windows", hostname, fingerprint }),
             ["GET /stats"] = _ => stats.Get(Version, Protocol, fingerprint),
             ["GET /env"] = _ => Done(env.Read()),
-            ["PUT /env"] = async ctx => await env.Put(await ctx.Request.ReadJson(), RestartOllama, ctx.RequestAborted),
+            ["PUT /env"] = async ctx => await env.Put(await ctx.Request.ReadJson(), () => ollama.Restart(ctx.RequestAborted), ctx.RequestAborted),
+            ["POST /service/restart"] = ctx => ollama.Restart(ctx.RequestAborted),
             ["GET /logs"] = ctx =>
             {
                 // slice() drops the fraction of a number like 15.5
@@ -62,11 +63,6 @@ public sealed class Api
     }
 
     string LogFile() => session.RequireUser().LogFile;
-
-    // POST /service/restart and the restart after PUT /env; PADDOCK_DRY_RUN=1 never touches Ollama
-    Task<object> RestartOllama() => cfg.DryRun
-        ? Done(new { ok = true, dry_run = true })
-        : throw new HttpError(501, "restarting Ollama isn't in the C# agent yet");
 
     static Task<object> Done(object body) => Task.FromResult(body);
 

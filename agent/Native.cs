@@ -121,4 +121,67 @@ static class Native
         long cluster = (long)spc * bps;
         return (total * cluster, free * cluster);
     }
+
+    // ---------------------------------------------------------------- starting Ollama
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct StartupInfo
+    {
+        public int cb;
+        public string? lpReserved, lpDesktop, lpTitle;
+        public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags;
+        public short wShowWindow, cbReserved2;
+        public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct ProcessInformation
+    {
+        public IntPtr hProcess, hThread;
+        public int dwProcessId, dwThreadId;
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessW(string? app, System.Text.StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes,
+        bool inheritHandles, uint flags, string? environment, string? currentDirectory, ref StartupInfo startup, out ProcessInformation info);
+
+    [DllImport("kernel32.dll")]
+    static extern bool CloseHandle(IntPtr handle);
+
+    /// <summary>
+    /// Start a process on its own, as Node's spawn with detached and stdio "ignore": no console of
+    /// ours, none of our handles, its own process group. env null keeps ours. Returns its PID.
+    /// </summary>
+    public static int StartDetached(string exe, IEnumerable<string> args, IReadOnlyDictionary<string, string>? env, string? cwd, bool hidden)
+    {
+        const uint DetachedProcess = 0x08, CreateNewProcessGroup = 0x200, CreateUnicodeEnvironment = 0x400;
+        const int StartfUseShowWindow = 0x01;
+        var commandLine = new System.Text.StringBuilder(string.Join(' ', new[] { exe }.Concat(args).Select(QuoteArgument)));
+        var startup = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>() };
+        if (hidden) { startup.dwFlags = StartfUseShowWindow; startup.wShowWindow = 0; /* SW_HIDE */ }
+        string? block = env is null ? null
+            : string.Concat(env.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase).Select(e => $"{e.Key}={e.Value}\0")) + "\0";
+        // with no folder in the name, CreateProcess searches the PATH like a shell would
+        if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, DetachedProcess | CreateNewProcessGroup | CreateUnicodeEnvironment,
+                block, cwd, ref startup, out var info))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), $"can't start {exe}");
+        CloseHandle(info.hThread);
+        CloseHandle(info.hProcess);
+        return info.dwProcessId;
+    }
+
+    /// <summary>One argument as CommandLineToArgvW reads it back.</summary>
+    static string QuoteArgument(string arg)
+    {
+        if (arg != "" && arg.IndexOfAny([' ', '\t', '"']) < 0) return arg;
+        var sb = new System.Text.StringBuilder("\"");
+        int slashes = 0;
+        foreach (char c in arg)
+        {
+            if (c == '\\') { slashes++; continue; }
+            sb.Append('\\', c == '"' ? slashes * 2 + 1 : slashes).Append(c);
+            slashes = 0;
+        }
+        return sb.Append('\\', slashes * 2).Append('"').ToString();
+    }
 }

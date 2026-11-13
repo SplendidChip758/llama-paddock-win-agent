@@ -13,8 +13,14 @@ public interface IUserSession
     /// <summary>Who runs Ollama right now, or null when the agent can't tell.</summary>
     OllamaUser? User();
 
+    /// <summary>Whether Launch can start Ollama in the user's session now. Checked before Ollama is stopped.</summary>
+    bool CanLaunch { get; }
+
     /// <summary>Tell the session the user's variables changed, so Ollama started afterwards sees them.</summary>
     Task NotifyEnvironmentChanged(CancellationToken ct);
+
+    /// <summary>Start Ollama in the user's session. Returns once it's started, not once it answers.</summary>
+    Task Launch(LaunchRequest request, CancellationToken ct);
 }
 
 public static class UserSessionExtensions
@@ -30,10 +36,17 @@ public sealed class InProcessSession(AgentConfig cfg) : IUserSession
 
     public string Mode => "in-process";
     public OllamaUser? User() => user;
+    public bool CanLaunch => true;
 
     public Task NotifyEnvironmentChanged(CancellationToken ct)
     {
         Native.BroadcastEnvironmentChange();
+        return Task.CompletedTask;
+    }
+
+    public Task Launch(LaunchRequest request, CancellationToken ct)
+    {
+        Launcher.Start(request);
         return Task.CompletedTask;
     }
 }
@@ -49,5 +62,7 @@ public sealed class HelperSession(AgentConfig cfg) : IUserSession
     public OllamaUser? User() => OllamaUser.Find(cfg);
 
     // the pipe to the tray app is built with service mode
+    public bool CanLaunch => false;
     public Task NotifyEnvironmentChanged(CancellationToken ct) => throw HttpError.NoHelper();
+    public Task Launch(LaunchRequest request, CancellationToken ct) => throw HttpError.NoHelper();
 }

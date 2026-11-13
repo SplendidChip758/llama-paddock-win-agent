@@ -41,7 +41,7 @@ public sealed class Env(AgentConfig cfg, IUserSession session)
         return up == "GPU_DEVICE_ORDINAL" || new[] { "OLLAMA_", "CUDA_", "HIP_", "ROCR_", "HSA_", "GGML_" }.Any(p => up.StartsWith(p, StringComparison.Ordinal));
     }
 
-    static bool IsManaged(string key, List<string> customKeys) =>
+    public static bool IsManaged(string key, List<string> customKeys) =>
         ManagedName(key) || customKeys.Any(k => k.ToLowerInvariant() == key.ToLowerInvariant());
 
     // agent-state.json: the variables added through the dashboard that don't look like Ollama's
@@ -69,6 +69,19 @@ public sealed class Env(AgentConfig cfg, IUserSession session)
         Dictionary<string, string> effective,
         Dictionary<string, string> external,
         string[] allowed);
+
+    /// <summary>
+    /// The Ollama variables a freshly started Ollama gets: the PC's, then the user's on top, and the
+    /// custom names that count as Ollama's.
+    /// </summary>
+    public (Dictionary<string, string> Vars, List<string> CustomKeys) OllamaVariables(OllamaUser user)
+    {
+        var customKeys = CustomKeys(LoadState());
+        var vars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var scope in new[] { user.MachineVariables(), user.UserVariables() ?? throw HttpError.NotSignedIn() })
+            foreach (var (k, v) in scope) if (IsManaged(k, customKeys)) vars[k] = v;
+        return (vars, customKeys);
+    }
 
     public State Read()
     {

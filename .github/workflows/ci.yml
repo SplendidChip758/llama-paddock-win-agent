@@ -86,7 +86,8 @@ jobs:
         run: dotnet build test/fake-ollama -c Release -o "$RUNNER_TEMP/fake-ollama" -warnaserror
 
       - name: Both agents answer the same
-        run: node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$RUNNER_TEMP/fake-ollama/ollama.exe"
+        # --restart: also restart the fake Ollama through each agent, out of dry run
+        run: node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$RUNNER_TEMP/fake-ollama/ollama.exe" --restart
 
   # PRs into main are merged with a merge commit, so every commit in them reaches
   # semantic-release, not just the PR title. PRs into dev are squash-merged, and
