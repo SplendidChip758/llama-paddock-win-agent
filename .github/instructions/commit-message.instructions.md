@@ -43,17 +43,17 @@ Pick the type by what users notice, not by which files changed.
 
 ## Scopes
 
-Optional, but use one when it fits: `installer` (`install.ps1`, `uninstall.ps1`), `ci`, `docs`.
+Optional, but use one when it fits: `installer` (the setup and `paddock-agent.exe install`), `tray`, `ci`, `docs`.
 
 ## Breaking changes
 
 **Don't mark a change as breaking (`!` or a `BREAKING CHANGE:` footer) unless the maintainer has agreed to it.**
 
-Breaking is reserved for upgrades that need the user to do something by hand, such as an env var removed or changing meaning. An API change older dashboards can't follow raises `PROTOCOL` (see AGENTS.md) and needs the maintainer too. If the installer or the updater handles the change, it isn't breaking: put upgrade notes in the body instead. 1.0.0 is cut deliberately, never as a side effect of a commit.
+Breaking is reserved for upgrades that need the user to do something by hand, such as an env var removed or changing meaning. An API change older dashboards can't follow raises `Api.Protocol` (see AGENTS.md) and needs the maintainer too. If the installer or the updater handles the change, it isn't breaking: put upgrade notes in the body instead. 1.0.0 is cut deliberately, never as a side effect of a commit.
 
 ## Never
 
-- Never edit `CHANGELOG.md` or the agent's `VERSION`. The release workflow writes them.
+- Never edit `CHANGELOG.md` or the projects' `<Version>`. The release workflow writes and stamps them.
 - Never put tokens, passwords or personal hostnames/IPs in a commit message.
 
 ## Examples
@@ -63,5 +63,5 @@ feat: report the GPU's fan speed
 fix: restart Ollama when the tray app isn't running
 fix(installer): keep agent.json when reinstalling
 docs: describe PADDOCK_AGENT_ENV_ALLOW
-ci: run the agent on Node 18.15
+ci: build the setup with Inno Setup 6.4
 ```

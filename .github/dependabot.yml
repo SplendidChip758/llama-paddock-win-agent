@@ -1,4 +1,4 @@
-# The agent has no dependencies, so only the GitHub Actions are kept up to date.
+# The GitHub Actions, and the agent's NuGet packages (the .NET runtime comes with the SDK CI installs).
 # Updates target dev, like every other change.
 version: 2
 updates:
@@ -12,3 +12,10 @@ updates:
     groups:
       actions:
         patterns: ["*"]
+  - package-ecosystem: "nuget"
+    directories: ["/agent", "/tray"]
+    target-branch: "dev"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build"

@@ -12,8 +12,59 @@ permissions:
   contents: read
 
 jobs:
-  # On Windows, where the agent and its installer run.
+  # The setup, end to end: built as a release builds it, installed over a
+  # running Node agent, the service through the tray app, an upgrade and an
+  # uninstall (test/service.ps1).
   agent:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
+      # the Node agent the setup moves over from
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Scripts parse
+        shell: pwsh
+        run: |
+          $failed = $false
+          foreach ($f in Get-ChildItem -Recurse -Include *.ps1 .github, test) {
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($f.FullName, [ref]$null, [ref]$errors) | Out-Null
+            foreach ($e in $errors) { Write-Host "::error file=$($f.FullName),line=$($e.Extent.StartLineNumber)::$($e.Message)"; $failed = $true }
+          }
+          if ($failed) { exit 1 }
+
+      - name: Build the setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+          ./.github/scripts/build-setup.ps1 -Version 0.0.0-ci
+
+      # the setup from this run, to try it on a real PC: the run's Artifacts section
+      - uses: actions/upload-artifact@v7
+        with:
+          name: llama-paddock-agent-setup
+          path: |
+            dist/llama-paddock-agent-setup.exe
+            dist/SHA256SUMS
+
+      - name: Build the fake Ollama
+        run: dotnet build test/fake-ollama -c Release -o "$env:RUNNER_TEMP/fake-ollama" -warnaserror
+
+      - name: Install, use, upgrade and uninstall
+        timeout-minutes: 20
+        shell: pwsh
+        run: ./test/service.ps1 -Setup dist/llama-paddock-agent-setup.exe -FakeOllama "$env:RUNNER_TEMP/fake-ollama/ollama.exe"
+
+  # The C# agent replaces the Node agent (test/legacy), so the two have to
+  # answer the same: test/compare.mjs runs both on the same files.
+  compare:
     runs-on: windows-latest
     defaults:
       run:
@@ -21,44 +72,30 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # the oldest Node the agent supports
+      - uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: 10.0.x
+
       - uses: actions/setup-node@v7
         with:
-          node-version: 18.15
+          node-version: 22
 
-      - name: Agent parses
-        run: node --check paddock-agent.mjs
+      - name: Build the C# agent
+        run: dotnet build agent -c Release -warnaserror
 
-      - name: Release script parses
-        run: bash -n .github/scripts/prepare-release.sh
+      - name: Build the tray app
+        run: dotnet build tray -c Release -warnaserror
 
-      - name: Installer scripts parse
-        shell: pwsh
-        run: |
-          $failed = $false
-          foreach ($f in "install.ps1", "uninstall.ps1") {
-            $errors = $null
-            [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f), [ref]$null, [ref]$errors) | Out-Null
-            foreach ($e in $errors) { Write-Host "::error file=$f,line=$($e.Extent.StartLineNumber)::$($e.Message)"; $failed = $true }
-          }
-          if ($failed) { exit 1 }
+      # a stand-in ollama.exe with a model runner, for /stats to find
+      - name: Build the fake Ollama
+        run: dotnet build test/fake-ollama -c Release -o "$RUNNER_TEMP/fake-ollama" -warnaserror
 
-      # The dashboard tells which agents it can use from /health and /stats, so
-      # the agent has to answer with the version and protocol on any change.
-      - name: Agent answers
-        run: |
-          PADDOCK_AGENT_TOKEN=ci-token PADDOCK_DRY_RUN=1 PADDOCK_AGENT_PORT=11435 \
-            PADDOCK_AGENT_TLS_KEY="$RUNNER_TEMP/agent.key" PADDOCK_AGENT_TLS_CERT="$RUNNER_TEMP/agent.crt" \
-            node paddock-agent.mjs > "$RUNNER_TEMP/agent.log" 2>&1 &
-          for _ in $(seq 30); do curl -fsS http://127.0.0.1:11435/health > health.json 2>/dev/null && break; sleep 1; done
-          cat "$RUNNER_TEMP/agent.log"
-          node -e '
-            const h = JSON.parse(require("fs").readFileSync("health.json", "utf8"));
-            if (typeof h.version !== "string" || !Number.isInteger(h.protocol) || h.platform !== "windows") throw new Error("bad /health: " + JSON.stringify(h));
-            console.log(`agent ${h.version}, protocol ${h.protocol}`);
-          '
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:11435/stats)" = 401
-          curl -fsS -H "Authorization: Bearer ci-token" http://127.0.0.1:11435/stats > /dev/null
+      - name: Both agents answer the same
+        # --tray: also run the C# agent as the service does, with and without the tray app
+        # --restart: also restart the fake Ollama through each agent, out of dry run
+        run: >-
+          node test/compare.mjs agent/bin/Release/net10.0-windows/paddock-agent.exe "$RUNNER_TEMP/fake-ollama/ollama.exe"
+          --tray=tray/bin/Release/net10.0-windows/paddock-agent-tray.exe --restart
 
   # PRs into main are merged with a merge commit, so every commit in them reaches
   # semantic-release, not just the PR title. PRs into dev are squash-merged, and

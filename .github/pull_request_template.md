@@ -17,13 +17,13 @@ See CONTRIBUTING.md. Open PRs against `dev`, not `main`.
 
 ## How it was tested
 
-<!-- What you ran and on what, e.g. "Windows 11 with Ollama 0.x, dry run", "installed with install.ps1". -->
+<!-- What you ran and on what, e.g. "Windows 11 with Ollama 0.x, dry run", "test/compare.mjs", "installed with the setup from CI". -->
 
 ## Checklist
 
 - [ ] PR title is a valid Conventional Commit
 - [ ] Targets `dev` (or `main` for an urgent hotfix)
-- [ ] `node --check paddock-agent.mjs` passes
+- [ ] `dotnet build agent` and `dotnet build tray` pass with `-warnaserror`, and `test/compare.mjs` passes
 - [ ] API kept in step with the Linux agent (llama-paddock-agent PR: ) and the simulated agent in llama-paddock (PR: ), if the API changed
-- [ ] `PROTOCOL` unchanged, or raised with the maintainer's agreement
+- [ ] `Api.Protocol` unchanged, or raised with the maintainer's agreement
 - [ ] No tokens, passwords or personal hostnames/IPs in code, logs or screenshots
