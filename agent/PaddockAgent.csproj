@@ -7,6 +7,7 @@
     <RootNamespace>LlamaPaddock.Agent</RootNamespace>
     <AssemblyName>paddock-agent</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>..\logo\paddock-agent.ico</ApplicationIcon>
     <!-- the release build sets the real one: dotnet publish -p:Version=1.2.3 -->
     <Version>0.0.0-dev</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>

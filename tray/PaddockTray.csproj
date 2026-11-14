@@ -10,10 +10,16 @@
     <RootNamespace>LlamaPaddock.Tray</RootNamespace>
     <AssemblyName>paddock-agent-tray</AssemblyName>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <ApplicationIcon>..\logo\paddock-agent.ico</ApplicationIcon>
     <!-- the release build sets the real one: dotnet publish -p:Version=1.2.3 -->
     <Version>0.0.0-dev</Version>
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
   </PropertyGroup>
+
+  <!-- the tray icon, read at the size the screen's scaling asks for -->
+  <ItemGroup>
+    <EmbeddedResource Include="..\logo\paddock-agent.ico" LogicalName="paddock-agent.ico" />
+  </ItemGroup>
 
   <!-- shared with the agent -->
   <ItemGroup>
