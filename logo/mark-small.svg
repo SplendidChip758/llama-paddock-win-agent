@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" shape-rendering="crispEdges">
+  <title>llama-paddock</title>
+  <rect width="16" height="16" rx="4" fill="#151d29"/>
+  <path fill="#45d6ae" fill-rule="evenodd" transform="translate(2 1)" d="M7 0h1v2h-1zM9 0h1v2h-1zM7 2h5v2h-5zM9 3h1v1h-1zM8 4h3v1h-3zM8 5h2v3h-2zM1 8h9v1h-9zM0 9h10v1h-10zM1 10h9v1h-9zM1 11h1v2h-1zM3 11h1v2h-1zM7 11h1v2h-1zM9 11h1v2h-1z"/>
+</svg>

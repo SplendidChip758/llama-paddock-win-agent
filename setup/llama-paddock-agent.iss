@@ -46,6 +46,7 @@ OutputBaseFilename=llama-paddock-agent-setup
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=..\logo\paddock-agent.ico
 CloseApplications=no
 UninstallDisplayName=llama-paddock agent
 UninstallDisplayIcon={app}\{#Agent}

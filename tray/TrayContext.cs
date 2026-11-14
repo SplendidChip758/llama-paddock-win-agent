@@ -16,8 +16,7 @@ sealed class TrayContext : ApplicationContext
 
         icon = new NotifyIcon
         {
-            // a placeholder until the logo is made into an .ico
-            Icon = SystemIcons.Application,
+            Icon = LogoIcon(),
             ContextMenuStrip = menu,
             Visible = true,
         };
@@ -32,6 +31,13 @@ sealed class TrayContext : ApplicationContext
         var invoker = new Control();
         invoker.CreateControl();
         server.StatusChanged += () => invoker.BeginInvoke(Show);
+    }
+
+    /// <summary>The logo at the notification area's size: 16 px at 100 % scaling, 24 at 150 %, 32 at 200 %.</summary>
+    static Icon LogoIcon()
+    {
+        using var ico = typeof(TrayContext).Assembly.GetManifestResourceStream("paddock-agent.ico")!;
+        return new Icon(ico, SystemInformation.SmallIconSize);
     }
 
     protected override void ExitThreadCore()
