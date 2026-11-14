@@ -36,7 +36,7 @@ It runs as a Windows service, so it reports the PC from startup, and leaves Olla
 
 ## Install
 
-Download `llama-paddock-agent-setup.exe` from the [latest release](https://github.com/SplendidChip758/llama-paddock-win-agent/releases/latest) and run it. It asks which user runs Ollama, installs the service and the tray app, and shows the agent URL, token and key fingerprint to enter in the dashboard. Over an install of the earlier Node.js agent it keeps the token, the HTTPS key and the settings, so the dashboard needs no change. **Settings > Apps** uninstalls it.
+Download `llama-paddock-agent-setup.exe` from the [latest release](https://github.com/SplendidChip758/llama-paddock-win-agent/releases/latest) and run it. It asks which user runs Ollama, installs the service and the tray app, can open Ollama to the network for the dashboard (`OLLAMA_HOST` and a firewall rule for its port), and shows the agent URL, token and key fingerprint and the Ollama URL to enter in the dashboard. Over an install of the earlier Node.js agent it keeps the token, the HTTPS key and the settings, so the dashboard needs no change. **Settings > Apps** uninstalls it.
 
 The [Windows agent docs](https://github.com/SplendidChip758/llama-paddock/blob/main/docs/agent-windows.md) cover the options, silent installs, updating, and adding the PC to the dashboard.
 

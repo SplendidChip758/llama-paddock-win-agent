@@ -5,8 +5,10 @@
 ; The wizard only asks; paddock-agent.exe does the work (install, uninstall, detect, stop), so the
 ; same steps run in the silent mode the CI test and later updates use:
 ;   llama-paddock-agent-setup.exe /VERYSILENT /SUPPRESSMSGBOXES [/OLLAMAUSER=<name or SID>] [/PORT=11435]
-;                                 [/ALLOWFROM=192.168.30.0/24] [/NOFIREWALL=1]
+;                                 [/ALLOWFROM=192.168.30.0/24] [/NOFIREWALL=1] [/OLLAMANETWORK=0|1]
 ;   unins000.exe /VERYSILENT [/KEEPDATA=1]
+; /OLLAMANETWORK=0 leaves Ollama listening on localhost only; new installs open it to the network
+; by default, updates and moves from the Node.js agent only with /OLLAMANETWORK=1.
 ; A silent install that couldn't start the agent exits with code 1; the reason is in the setup log (/LOG=<file>).
 
 ; ExecAndLogOutput passes the installer's progress to the wizard
@@ -66,7 +68,7 @@ Name: "{autoprograms}\llama-paddock agent"; Filename: "{app}\{#Tray}"
 var
   UserPage: TInputOptionWizardPage;
   NetworkPage: TInputQueryWizardPage;
-  FirewallBox: TNewCheckBox;
+  FirewallBox, OllamaBox: TNewCheckBox;
   ResultPage: TOutputMsgMemoWizardPage;
   Installed, InstallOk: Boolean;
   Legacy, DetectedUser: String;
@@ -157,6 +159,24 @@ begin
   FirewallBox.Width := NetworkPage.SurfaceWidth;
   FirewallBox.Caption := 'Add a Windows Firewall rule for the agent port';
   FirewallBox.Checked := ExpandConstant('{param:NOFIREWALL|0}') = '0';
+  // Ollama for Windows only listens on localhost until OLLAMA_HOST says otherwise
+  OllamaBox := TNewCheckBox.Create(NetworkPage);
+  OllamaBox.Parent := NetworkPage.Surface;
+  OllamaBox.Top := FirewallBox.Top + FirewallBox.Height + ScaleY(8);
+  OllamaBox.Width := NetworkPage.SurfaceWidth;
+  OllamaBox.Caption := 'Let the dashboard reach Ollama (port 11434)';
+  OllamaBox.Checked := ExpandConstant('{param:OLLAMANETWORK|1}') <> '0';
+  with TNewStaticText.Create(NetworkPage) do begin
+    Parent := NetworkPage.Surface;
+    Top := OllamaBox.Top + OllamaBox.Height + ScaleY(4);
+    Left := ScaleX(16);
+    Width := NetworkPage.SurfaceWidth - ScaleX(16);
+    AutoSize := False;
+    WordWrap := True;
+    Height := ScaleY(42);
+    Caption := 'Sets OLLAMA_HOST to 0.0.0.0:11434 unless it''s already set, restarts Ollama, and allows its port ' +
+      'from the same addresses as the agent. Ollama has no password: only allow addresses you trust.';
+  end;
 
   ResultPage := CreateOutputMsgMemoPage(wpInstalling, 'Add this PC to the dashboard', '', '', '');
 end;
@@ -196,9 +216,18 @@ begin
     Result := 'Couldn''t stop the running agent: ' + Res('error', ExpandConstant('{tmp}\stop.ini'));
 end;
 
+// new installs open Ollama to the network as the Network page says; updates and moves keep what's there
+function OllamaNetwork(): Boolean;
+begin
+  if ExpandConstant('{param:OLLAMANETWORK}') <> '' then
+    Result := ExpandConstant('{param:OLLAMANETWORK}') <> '0'
+  else
+    Result := not Installed and (Legacy = '') and OllamaBox.Checked;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Args, F, Url, Others, User, Error: String;
+  Args, F, N, Url, OllamaUrl, Others, User, Error, Warnings: String;
   Code: Integer;
 begin
   if CurStep <> ssPostInstall then Exit;
@@ -221,6 +250,25 @@ begin
     ExecAsOriginalUser(ExpandConstant('{app}\{#Tray}'), '', '', SW_SHOWNORMAL, ewNoWait, Code);
     ResultPage.Description := 'The agent is running.';
     Url := Res('url', F);
+    OllamaUrl := Res('ollama_url', F);
+    Warnings := Res('warnings', F);
+    // after the tray app: setting OLLAMA_HOST restarts Ollama through it
+    if OllamaNetwork() then begin
+      N := ExpandConstant('{tmp}\ollama-network.ini');
+      Args := 'ollama-network';
+      if not Installed and (Legacy = '') then begin
+        Args := Args + ' --allow-from ' + AddQuotes(Trim(NetworkPage.Values[1]));
+        if not FirewallBox.Checked then Args := Args + ' --no-firewall';
+      end;
+      DeleteFile(N);
+      if ExecAndLogOutput(ExpandConstant('{app}\{#Agent}'), Args + ' --result ' + AddQuotes(N), '', SW_HIDE,
+          ewWaitUntilTerminated, Code, @OnInstallerOutput) and (Code = 0) then
+        OllamaUrl := Res('ollama_url', N)
+      else
+        Log('ollama-network failed: ' + Res('error', N));
+      if Res('error', N) <> '' then Warnings := Warnings + ' | couldn''t open Ollama to the network: ' + Res('error', N);
+      if Res('warnings', N) <> '' then Warnings := Warnings + ' | ' + Res('warnings', N);
+    end;
     Others := Res('addresses', F);
     // the first address is in the URL; the others are worth knowing on a PC with several networks
     if Pos(' | ', Others) > 0 then
@@ -232,13 +280,15 @@ begin
         'In the dashboard, choose Add host and enter:' + #13#10#13#10 +
         'Agent URL:  ' + Url + Others + #13#10 +
         'Agent token:  ' + Res('token', F) + #13#10 +
+        'Ollama URL:  ' + OllamaUrl + '  (plain http: Ollama has no HTTPS)' + #13#10 +
         'Key fingerprint:  ' + Res('fingerprint', F) + #13#10#13#10 +
         'Copy them from here: the token isn''t shown again. It is stored in ' + ExpandConstant('{commonappdata}') + '\llama-paddock-agent\agent.json, which only administrators can read.'
     else
       ResultPage.RichEditViewer.Text :=
         'The token and the HTTPS key were kept, so there is nothing to change in the dashboard.' + #13#10#13#10 +
         'Agent URL:  ' + Url + Others + #13#10 +
-        'Key fingerprint:  ' + Res('fingerprint', F);
+        'Key fingerprint:  ' + Res('fingerprint', F) + #13#10 +
+        'Ollama URL:  ' + OllamaUrl + '  (plain http: Ollama has no HTTPS)';
     ResultPage.RichEditViewer.Text := ResultPage.RichEditViewer.Text + #13#10#13#10 +
       'Ollama user: ' + Res('user', F) + '. The tray app restarts Ollama for the dashboard while they''re signed in.';
   end else begin
@@ -247,9 +297,13 @@ begin
     ResultPage.Description := 'The agent could not be started.';
     ResultPage.RichEditViewer.Text := Error;
     Log('install failed: ' + Error);
+    Warnings := Res('warnings', F);
   end;
-  if Res('warnings', F) <> '' then
-    ResultPage.RichEditViewer.Text := ResultPage.RichEditViewer.Text + #13#10#13#10 + 'Note: ' + Res('warnings', F);
+  // the joined lists may start with their separator
+  if Copy(Warnings, 1, 3) = ' | ' then Warnings := Copy(Warnings, 4, Length(Warnings));
+  StringChangeEx(Warnings, ' | ', #13#10 + 'Note: ', True);
+  if Warnings <> '' then
+    ResultPage.RichEditViewer.Text := ResultPage.RichEditViewer.Text + #13#10#13#10 + 'Note: ' + Warnings;
 end;
 
 // a silent run reports a failed install through its exit code
