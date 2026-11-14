@@ -1,3 +1,9 @@
+## [0.10.0-dev.3](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.2...v0.10.0-dev.3) (2026-11-14)
+
+### Bug Fixes
+
+* **tray:** show the llama-paddock logo instead of a stock icon ([#3](https://github.com/SplendidChip758/llama-paddock-win-agent/issues/3)) ([038e1c4](https://github.com/SplendidChip758/llama-paddock-win-agent/commit/038e1c432b4a16f756b65a734e309f42157c82e1)), closes [SplendidChip758/llama-paddock#18](https://github.com/SplendidChip758/llama-paddock/issues/18)
+
 ## [0.10.0-dev.2](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.1...v0.10.0-dev.2) (2026-11-14)
 
 ### Features
