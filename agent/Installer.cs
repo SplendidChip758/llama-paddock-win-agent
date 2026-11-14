@@ -19,16 +19,21 @@ namespace LlamaPaddock.Agent;
 /// wizard only asks; these do the work, so a silent install runs the same steps. Each writes its
 /// result to --result (INI, which the setup's script reads) or prints it as JSON.
 ///
+/// ollama-network, run after the tray app has started, lets the dashboard reach Ollama: OLLAMA_HOST
+/// on all addresses unless it's already set, Ollama restarted through the agent, and a firewall rule.
+///
 /// Install registers the agent as a LocalSystem service, which reads the Ollama user's files and
 /// variables and leaves Ollama itself as it is, and the tray app to start at sign-in. It moves a
 /// scheduled-task install of the Node agent over with its token, HTTPS key and settings, so the
 /// dashboard needs no change.
 /// </summary>
-public static class Installer
+public static partial class Installer
 {
     public const string ServiceName = "llama-paddock-agent";
     const string TaskName = "llama-paddock-agent";
     const string FirewallRule = "llama-paddock agent";
+    const string OllamaFirewallRule = "llama-paddock Ollama";
+    const string OllamaListenAll = "0.0.0.0:11434";
     const string RunKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
     const string RunValue = "llama-paddock agent";
     const string TrayExe = "paddock-agent-tray.exe";
@@ -37,7 +42,7 @@ public static class Installer
     static string ProgramDir => AppContext.BaseDirectory.TrimEnd('\\');
     public static string DataDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "llama-paddock-agent");
 
-    public static bool IsCommand(string[] args) => args.Length > 0 && args[0] is "install" or "uninstall" or "detect" or "stop";
+    public static bool IsCommand(string[] args) => args.Length > 0 && args[0] is "install" or "uninstall" or "detect" or "stop" or "ollama-network";
 
     public static int Run(string[] args)
     {
@@ -56,6 +61,7 @@ public static class Installer
                 case "detect": Detect(result); break;
                 // before the setup replaces the files the service and the tray apps have open
                 case "stop": StopService(); StopTrays(); break;
+                case "ollama-network": OllamaNetwork(opts, result, warnings); break;
             }
             result["ok"] = true;
         }
@@ -340,6 +346,8 @@ public static class Installer
         result["addresses"] = addresses;
         result["hostname"] = Dns.GetHostName();
         result["url"] = $"https://{addresses.FirstOrDefault() ?? Dns.GetHostName()}:{agentPort}";
+        // where the dashboard reaches Ollama itself: plain HTTP, Ollama has no HTTPS
+        result["ollama_url"] = OllamaUrl(CurrentOllamaHost(OllamaUser.Find(AgentConfig.Load(DataDir))));
         if (token is not null) result["token"] = token;
     }
 
@@ -391,6 +399,131 @@ public static class Installer
         }
     }
 
+    // ---------------------------------------------------------------- Ollama on the network
+    /// <summary>
+    /// Ollama for Windows listens on localhost only, so the dashboard can't reach it until OLLAMA_HOST
+    /// says otherwise and the firewall lets its port in. OLLAMA_HOST is set through the agent's own
+    /// PUT /env, which restarts Ollama through the tray app, so it runs after the setup has started that.
+    /// A value already set is the user's choice and stays.
+    /// </summary>
+    static void OllamaNetwork(Dictionary<string, string> opts, Dictionary<string, object?> result, List<string> warnings)
+    {
+        var cfg = AgentConfig.Load(DataDir);
+        if (cfg.Token == "") throw new InvalidOperationException($"no agent.json in {DataDir}: install the agent first");
+        var user = OllamaUser.Find(cfg) ?? throw new InvalidOperationException("the agent has no Ollama user: install the agent first");
+        var current = CurrentOllamaHost(user);
+        string host;
+        if (!string.IsNullOrEmpty(current))
+        {
+            host = current;
+            if (LoopbackOnly(current))
+                warnings.Add($"OLLAMA_HOST is {current}, so Ollama only answers on this PC: set it to 0.0.0.0:{OllamaPort(current)} in the dashboard's Environment tab");
+        }
+        else
+        {
+            host = OllamaListenAll;
+            Step("Letting Ollama listen on the network");
+            SetOllamaHost(cfg, user, host, warnings);
+        }
+        if (!opts.ContainsKey("no-firewall"))
+        {
+            Step("Adding the firewall rule for Ollama");
+            // the same addresses as the agent's rule, unless others are given
+            FirewallRuleFor(OllamaFirewallRule, OllamaPort(host), opts.GetValueOrDefault("allow-from") is { Length: > 0 } a ? a : RuleAddresses(FirewallRule), warnings);
+        }
+        result["ollama_host"] = host;
+        result["ollama_url"] = OllamaUrl(host);
+    }
+
+    /// <summary>
+    /// Through the agent, which checks it like any change from the dashboard and restarts Ollama. The
+    /// tray app may still be starting, so a 409 is tried again for a while; if it stays, the value is
+    /// written directly and applies when Ollama next starts.
+    /// </summary>
+    static void SetOllamaHost(AgentConfig cfg, OllamaUser user, string host, List<string> warnings)
+    {
+        var env = CallAgent(cfg, HttpMethod.Get, "/env", null);
+        if (env.Status != 200)
+        {
+            warnings.Add($"couldn't set OLLAMA_HOST: {Detail(env)}. Set it to {host} in the dashboard's Environment tab");
+            return;
+        }
+        var vars = env.Body?["managed"]?.DeepClone() as JsonObject ?? new JsonObject();
+        vars["OLLAMA_HOST"] = host;
+        var body = new JsonObject { ["vars"] = vars, ["restart"] = true };
+        var deadline = DateTime.UtcNow.AddSeconds(30);
+        (int Status, JsonNode? Body) put;
+        while ((put = CallAgent(cfg, HttpMethod.Put, "/env", body)).Status == 409 && DateTime.UtcNow < deadline) Thread.Sleep(1000);
+        if (put.Status == 200)
+        {
+            if (put.Body?["restart"]?["ok"]?.GetValue<bool>() == false)
+                warnings.Add($"OLLAMA_HOST is set, but Ollama didn't answer after its restart: {put.Body["restart"]?["stderr"]}");
+            return;
+        }
+        if (put.Status == 409 && user.SignedIn)
+        {
+            user.WriteUserVariables([KeyValuePair.Create<string, string?>("OLLAMA_HOST", host)]);
+            warnings.Add($"OLLAMA_HOST is set to {host}, but the tray app isn't running in {user.Name}'s session to restart Ollama: restart Ollama, or sign out and in, for it to apply");
+            return;
+        }
+        warnings.Add($"couldn't set OLLAMA_HOST: {Detail(put)}. Set it to {host} in the dashboard's Environment tab");
+    }
+
+    static string Detail((int Status, JsonNode? Body) r) => r.Body?["detail"]?.GetValue<string>() ?? $"the agent answered {r.Status}";
+
+    /// <summary>The agent on the loopback interface, with its token: HTTPS, or plain HTTP if that's all it serves.</summary>
+    static (int Status, JsonNode? Body) CallAgent(AgentConfig cfg, HttpMethod method, string path, JsonNode? body)
+    {
+        // only for this call to 127.0.0.1: the agent's certificate is self-signed
+        using var http = new HttpClient(new HttpClientHandler { ServerCertificateCustomValidationCallback = (_, _, _, _) => true })
+            { Timeout = TimeSpan.FromSeconds(90) };
+        Exception? last = null;
+        foreach (var scheme in new[] { "https", "http" })
+        {
+            try
+            {
+                using var req = new HttpRequestMessage(method, $"{scheme}://127.0.0.1:{cfg.Port}{path}");
+                req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", cfg.Token);
+                if (body is not null) req.Content = new StringContent(body.ToJsonString(), Encoding.UTF8, "application/json");
+                using var res = http.Send(req);
+                var text = res.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+                JsonNode? json = null;
+                try { json = JsonNode.Parse(text); } catch (JsonException) { }
+                return ((int)res.StatusCode, json);
+            }
+            catch (HttpRequestException e) { last = e; }
+        }
+        throw new InvalidOperationException($"the agent doesn't answer on port {cfg.Port}: {last?.Message}");
+    }
+
+    /// <summary>OLLAMA_HOST as Ollama sees it: the user's, else the PC's; null when neither sets it.</summary>
+    static string? CurrentOllamaHost(OllamaUser? user)
+    {
+        if (user is null) return null;
+        foreach (var scope in new[] { user.UserVariables(), user.MachineVariables() })
+            if (scope?.GetValueOrDefault("OLLAMA_HOST") is { Length: > 0 } v) return v;
+        return null;
+    }
+
+    [GeneratedRegex("^[a-z]+://", RegexOptions.IgnoreCase)]
+    private static partial Regex Scheme();
+
+    /// <summary>The port in OLLAMA_HOST ("0.0.0.0:11434", "http://host:8080", ":11434"), else Ollama's 11434.</summary>
+    static int OllamaPort(string? host)
+    {
+        var m = Regex.Match(Scheme().Replace(host ?? "", ""), @":(\d{1,5})/?$");
+        return m.Success && int.TryParse(m.Groups[1].Value, out var p) && p is > 0 and < 65536 ? p : 11434;
+    }
+
+    /// <summary>Whether OLLAMA_HOST keeps Ollama to this PC: a loopback address or localhost.</summary>
+    static bool LoopbackOnly(string host)
+    {
+        var h = Regex.Replace(Scheme().Replace(host, ""), @":\d{1,5}/?$", "").Trim('[', ']').ToLowerInvariant();
+        return h == "localhost" || h == "::1" || h.StartsWith("127.", StringComparison.Ordinal);
+    }
+
+    static string OllamaUrl(string? host) => $"http://{LanAddresses().FirstOrDefault() ?? Dns.GetHostName()}:{OllamaPort(host)}";
+
     // ---------------------------------------------------------------- uninstall
     static void Uninstall(bool keepData, List<string> warnings)
     {
@@ -401,6 +534,8 @@ public static class Installer
         if (TaskExists()) Run("schtasks.exe", "/Delete", "/TN", TaskName, "/F");
         StopLegacyAgent();
         Run("netsh.exe", "advfirewall", "firewall", "delete", "rule", $"name={FirewallRule}");
+        // OLLAMA_HOST stays: it's one of the user's Ollama variables, which uninstalling leaves alone
+        Run("netsh.exe", "advfirewall", "firewall", "delete", "rule", $"name={OllamaFirewallRule}");
         if (!keepData)
         {
             try { Directory.Delete(DataDir, true); }
@@ -466,15 +601,23 @@ public static class Installer
     /// <summary>A fresh rule for the agent's port; on an upgrade the existing rule's addresses are kept unless new ones are given.</summary>
     static void Firewall(int port, string? allowFrom, bool keepExisting, List<string> warnings)
     {
-        if (string.IsNullOrEmpty(allowFrom) && keepExisting)
-        {
-            var show = Run("netsh.exe", "advfirewall", "firewall", "show", "rule", $"name={FirewallRule}");
-            var m = Regex.Match(show.Output, @"RemoteIP:\s*(\S+)");
-            if (show.Code == 0 && m.Success) allowFrom = m.Groups[1].Value;
-        }
+        if (string.IsNullOrEmpty(allowFrom) && keepExisting) allowFrom = RuleAddresses(FirewallRule);
+        FirewallRuleFor(FirewallRule, port, allowFrom, warnings);
+    }
+
+    /// <summary>The remote addresses an existing rule allows, or null.</summary>
+    static string? RuleAddresses(string rule)
+    {
+        var show = Run("netsh.exe", "advfirewall", "firewall", "show", "rule", $"name={rule}");
+        var m = Regex.Match(show.Output, @"RemoteIP:\s*(\S+)");
+        return show.Code == 0 && m.Success ? m.Groups[1].Value : null;
+    }
+
+    static void FirewallRuleFor(string rule, int port, string? allowFrom, List<string> warnings)
+    {
         if (string.IsNullOrEmpty(allowFrom)) allowFrom = "LocalSubnet";
-        Run("netsh.exe", "advfirewall", "firewall", "delete", "rule", $"name={FirewallRule}");
-        var r = Run("netsh.exe", "advfirewall", "firewall", "add", "rule", $"name={FirewallRule}", "dir=in", "action=allow",
+        Run("netsh.exe", "advfirewall", "firewall", "delete", "rule", $"name={rule}");
+        var r = Run("netsh.exe", "advfirewall", "firewall", "add", "rule", $"name={rule}", "dir=in", "action=allow",
             "protocol=TCP", $"localport={port}", $"remoteip={allowFrom}", "profile=private,domain");
         if (r.Code != 0) warnings.Add($"couldn't add the firewall rule for TCP {port}: {r.Output.Trim()}");
     }

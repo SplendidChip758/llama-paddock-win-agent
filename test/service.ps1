@@ -135,6 +135,20 @@ try {
   Check 'the tray app started Ollama' ($server -and $server.Parent -eq $tray.Id) ($server | ConvertTo-Json)
   Check 'Ollama answers after the restart' (WaitFor 10 { (Invoke-WebRequest "http://$ollamaHost/api/version").StatusCode -eq 200 })
 
+  # --- Ollama on the network ------------------------------------------------------
+  # unset: set through the agent, Ollama restarted by the tray app, its port let in
+  $cmd = Join-Path $prog 'paddock-agent.exe'
+  [Environment]::SetEnvironmentVariable('OLLAMA_HOST', $null, 'User')
+  $out = & $cmd ollama-network | ConvertFrom-Json
+  Check 'ollama-network sets OLLAMA_HOST' ($out.ok -and [Environment]::GetEnvironmentVariable('OLLAMA_HOST', 'User') -eq '0.0.0.0:11434') ($out | ConvertTo-Json)
+  Check 'Ollama listens on the network after its restart' (WaitFor 20 { (Invoke-WebRequest 'http://127.0.0.1:11434/api/version').StatusCode -eq 200 })
+  Check 'the firewall lets Ollama''s port in' ((Get-NetFirewallRule -DisplayName 'llama-paddock Ollama' -ErrorAction SilentlyContinue | Get-NetFirewallPortFilter).LocalPort -eq '11434')
+  Check 'the Ollama URL is plain HTTP on its port' ($out.ollama_url -match '^http://.+:11434$') $out.ollama_url
+  # already set: the user's choice stays, with a note when only this PC can reach Ollama
+  [Environment]::SetEnvironmentVariable('OLLAMA_HOST', $ollamaHost, 'User')
+  $out = & $cmd ollama-network | ConvertFrom-Json
+  Check 'ollama-network leaves an OLLAMA_HOST that is set' ($out.ok -and [Environment]::GetEnvironmentVariable('OLLAMA_HOST', 'User') -eq $ollamaHost -and ($out.warnings -join ' ') -match 'only answers on this PC') ($out | ConvertTo-Json)
+
   # --- an upgrade over the running service and tray app -------------------------
   Write-Host '==> upgrade'
   Check 'the upgrade succeeds' ((RunSetup $Setup) -eq 0)
@@ -147,6 +161,7 @@ try {
   Check 'the service is gone' (-not (Get-Service $name -ErrorAction SilentlyContinue))
   Check 'the tray apps are gone' ((Trays).Count -eq 0 -and $null -eq (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run').'llama-paddock agent')
   Check 'the data folder is gone' (-not (Test-Path $data))
+  Check 'the Ollama firewall rule is gone' (-not (Get-NetFirewallRule -DisplayName 'llama-paddock Ollama' -ErrorAction SilentlyContinue))
   Check 'the program folder is gone' (WaitFor 10 { -not (Test-Path (Join-Path $prog 'paddock-agent.exe')) })
 }
 finally {
