@@ -1,3 +1,9 @@
+## [0.10.0-dev.4](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.3...v0.10.0-dev.4) (2026-11-14)
+
+### Features
+
+* **installer:** open Ollama to the network and show its URL ([#4](https://github.com/SplendidChip758/llama-paddock-win-agent/issues/4)) ([6d12c28](https://github.com/SplendidChip758/llama-paddock-win-agent/commit/6d12c28c213df065a97c311adc8c027831273704)), closes [SplendidChip758/llama-paddock#18](https://github.com/SplendidChip758/llama-paddock/issues/18)
+
 ## [0.10.0-dev.3](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.2...v0.10.0-dev.3) (2026-11-14)
 
 ### Bug Fixes
