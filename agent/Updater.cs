@@ -253,8 +253,12 @@ public sealed partial class Updater
         using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.Accept.ParseAdd("application/vnd.github+json");
         HttpResponseMessage? res = null;
-        try { res = await http.SendAsync(req); }
-        catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { Say($"GitHub's API didn't answer ({e.Message}); trying the releases feed"); }
+        Say($"asking {url}");
+        using (var api = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        {
+            try { res = await http.SendAsync(req, api.Token); }
+            catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { Say($"GitHub's API didn't answer ({e.Message}); trying the releases feed"); }
+        }
         using (res)
         {
             if (res?.StatusCode == HttpStatusCode.NotFound && channel == "stable") return null;
@@ -291,6 +295,7 @@ public sealed partial class Updater
         {
             try
             {
+                Say($"downloading {url}");
                 using var res = await http.GetAsync(url);
                 if (res.StatusCode == HttpStatusCode.NotFound) throw new InvalidOperationException($"{url} isn't there (404)");
                 if (res.IsSuccessStatusCode) return await res.Content.ReadAsByteArrayAsync();

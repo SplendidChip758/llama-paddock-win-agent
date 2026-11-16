@@ -179,6 +179,12 @@ try {
       if (-not $hash) { $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower() }
       [IO.File]::WriteAllText((Join-Path $dir 'SHA256SUMS'), "$hash  llama-paddock-agent-setup.exe`n")
     }
+    # what the agent and the fake releases did, for a failed check
+    function UpdateLogs {
+      foreach ($f in $updateLog, (Join-Path $data 'logs\agent.log'), (Join-Path $env:RUNNER_TEMP 'fake-releases.log')) {
+        "--- $f"; if (Test-Path $f) { Get-Content -Tail 25 $f }
+      }
+    }
     # the agent restarts during an update, so a call can fail: WaitFor tries again
     function Finished([int]$seconds) { WaitFor $seconds { (Agent GET /update).Body.state -ne 'running' } }
     function UpdateState { (Agent GET /update).Body }
@@ -198,19 +204,19 @@ try {
     $r = Agent POST /update @{ channel = 'dev' }
     Check 'the update starts' ($r.Status -eq 200) ($r | ConvertTo-Json)
     Check 'a second update meanwhile is refused' ((Agent POST /update @{ channel = 'dev' }).Status -eq 409)
-    Check 'the agent comes back updated' (WaitFor 300 { (Health).version -eq '0.0.1-ci' }) (Get-Content -Raw $updateLog)
-    Check 'the update finishes' ((Finished 60) -and (UpdateState).state -eq 'idle') (Get-Content -Raw $updateLog)
+    Check 'the agent comes back updated' (WaitFor 300 { (Health).version -eq '0.0.1-ci' }) ((UpdateLogs) -join "`n")
+    Check 'the update finishes' ((Finished 60) -and (UpdateState).state -eq 'idle') ((UpdateLogs) -join "`n")
     Check 'the update keeps the HTTPS key and the token' ((Health).fingerprint -eq $fingerprint -and (Agent GET /env).Status -eq 200)
-    Check 'the service starts the tray app again' (WaitFor 30 { (Trays).Count -gt 0 }) (Get-Content -Tail 20 -Raw (Join-Path $data 'logs\agent.log'))
+    Check 'the service starts the tray app again' (WaitFor 30 { (Trays).Count -gt 0 }) ((UpdateLogs) -join "`n")
     Check 'the copy of the previous version is removed' (-not (Test-Path (Join-Path $data 'update\previous')))
 
     $null = Agent POST /update @{ channel = 'dev' }
-    Check 'an update with nothing newer finishes at once' ((Finished 60) -and (UpdateState).state -eq 'idle' -and (Select-String -Path $updateLog -Pattern 'already on v0.0.1-ci' -Quiet)) (Get-Content -Raw $updateLog)
+    Check 'an update with nothing newer finishes at once' ((Finished 60) -and (UpdateState).state -eq 'idle' -and (Select-String -Path $updateLog -Pattern 'already on v0.0.1-ci' -Quiet)) ((UpdateLogs) -join "`n")
 
     # a "setup" that exits with an error: the previous version is put back
     Release 'v0.0.2-ci' (Join-Path $env:SystemRoot 'System32\where.exe')
     $null = Agent POST /update @{ channel = 'dev' }
-    Check 'a failing setup fails the update' ((Finished 300) -and ($u = UpdateState).state -eq 'failed' -and $u.result -match 'previous version was put back') ($u | ConvertTo-Json -Depth 3)
+    Check 'a failing setup fails the update' ((Finished 300) -and ($u = UpdateState).state -eq 'failed' -and $u.result -match 'previous version was put back') (($u | ConvertTo-Json -Depth 3) + "`n" + ((UpdateLogs) -join "`n"))
     Check 'the failed update''s log comes with it' (($u.log -join "`n") -match 'exit code') ($u | ConvertTo-Json -Depth 3)
     Check 'the previous version runs again' ((Health).version -eq '0.0.1-ci')
   }
