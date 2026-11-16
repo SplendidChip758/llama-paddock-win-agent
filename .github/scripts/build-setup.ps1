@@ -1,17 +1,19 @@
 # Builds dist\llama-paddock-agent-setup.exe and dist\SHA256SUMS, on Windows (CI's windows-latest,
 # or a PC with the .NET 10 SDK and Inno Setup 6):
-#   pwsh .github/scripts/build-setup.ps1 -Version 1.2.3
+#   pwsh .github/scripts/build-setup.ps1 -Version 1.2.3 [-Dist <folder>]
 # The agent and the tray app are published self-contained into one folder, so the PC needs nothing
 # installed first and the two share one copy of the .NET runtime (single-file exes would carry one
 # each, and their compression leaves the setup's nothing to do: twice the download).
 param(
   [string]$Version = "0.0.0-dev",
-  [string]$Iscc = ""
+  [string]$Iscc = "",
+  # CI builds a second, newer setup into another folder, to update to
+  [string]$Dist = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Resolve-Path (Join-Path $PSScriptRoot "..\..")
 $out = Join-Path $root "build\out"
-$dist = Join-Path $root "dist"
+$dist = if ($Dist) { [IO.Path]::GetFullPath($Dist, $root) } else { Join-Path $root "dist" }
 Remove-Item -Recurse -Force $out, $dist -ErrorAction SilentlyContinue
 
 foreach ($project in "agent", "tray") {
@@ -31,7 +33,7 @@ if (-not $Iscc) {
 }
 if (-not $Iscc) { throw "Inno Setup 6 not found: winget install JRSoftware.InnoSetup, or pass -Iscc" }
 Write-Host "==> setup ($Iscc)"
-& $Iscc /Q "/DAppVersion=$Version" (Join-Path $root "setup\llama-paddock-agent.iss")
+& $Iscc /Q "/DAppVersion=$Version" "/O$dist" (Join-Path $root "setup\llama-paddock-agent.iss")
 if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
 
 # checksums: the setup, and what it installs

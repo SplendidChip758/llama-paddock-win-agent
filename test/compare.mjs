@@ -278,6 +278,8 @@ async function llamaServers() {
 // fields that change between calls
 function stable(route, body) {
   if (!body || typeof body !== "object") return body;
+  // the Node agent can't update itself, so it has no self_update (and no /update)
+  if (route === "/health" || route === "/stats") delete body.self_update;
   if (route === "/stats" && body.system) return statsView(body);
   const { ts: _ts, ...rest } = body;
   if (route === "/health") delete rest.version;

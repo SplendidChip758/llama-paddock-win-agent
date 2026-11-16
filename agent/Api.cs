@@ -27,7 +27,7 @@ public sealed class Api
     readonly Env env;
     readonly OllamaControl ollama;
 
-    public Api(AgentConfig cfg, IUserSession session, string? fingerprint)
+    public Api(AgentConfig cfg, IUserSession session, string? fingerprint, Updater updater)
     {
         this.session = session;
         this.fingerprint = fingerprint;
@@ -36,8 +36,8 @@ public sealed class Api
         ollama = new OllamaControl(cfg, session, env);
         Routes = new Dictionary<string, Func<HttpContext, Task<object>>>
         {
-            ["GET /health"] = _ => Done(new { ok = true, version = Version, protocol = Protocol, platform = "windows", hostname, fingerprint }),
-            ["GET /stats"] = _ => stats.Get(Version, Protocol, fingerprint),
+            ["GET /health"] = _ => Done(new { ok = true, version = Version, protocol = Protocol, platform = "windows", hostname, fingerprint, self_update = updater.SelfUpdate }),
+            ["GET /stats"] = _ => stats.Get(Version, Protocol, fingerprint, updater.SelfUpdate),
             ["GET /env"] = _ => Done(env.Read()),
             ["PUT /env"] = async ctx => await env.Put(await ctx.Request.ReadJson(), () => ollama.Restart(ctx.RequestAborted), ctx.RequestAborted),
             ["POST /service/restart"] = ctx => ollama.Restart(ctx.RequestAborted),
@@ -50,6 +50,8 @@ public sealed class Api
             ["GET /gpu-check"] = _ => Done(new { ts = Js.Now(), platform = "windows", log = OllamaLog.GpuLog(LogFile()) }),
             ["POST /gpu/reload-uvm"] = _ =>
                 throw new HttpError(400, "nvidia_uvm is a Linux kernel module; on Windows, restart Ollama instead"),
+            ["GET /update"] = _ => Done(updater.Status()),
+            ["POST /update"] = async ctx => updater.Start(await ctx.Request.ReadJson()),
             ["GET /runner-starts"] = ctx =>
             {
                 double now = Js.Now();

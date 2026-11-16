@@ -200,4 +200,51 @@ static class Native
     /// <summary>The process that connected to a pipe we serve, or null.</summary>
     public static int? PipeClientProcessId(SafePipeHandle pipe) =>
         GetNamedPipeClientProcessId(pipe, out var pid) ? (int)pid : null;
+
+    // ---------------------------------------------------------------- the tray app after an update
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    static extern bool WTSQueryUserToken(int sessionId, out SafeAccessTokenHandle token);
+
+    [DllImport("userenv.dll", SetLastError = true)]
+    static extern bool CreateEnvironmentBlock(out IntPtr environment, SafeAccessTokenHandle token, bool inherit);
+
+    [DllImport("userenv.dll")]
+    static extern bool DestroyEnvironmentBlock(IntPtr environment);
+
+    [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern bool CreateProcessAsUserW(SafeAccessTokenHandle token, string? app, System.Text.StringBuilder commandLine, IntPtr processAttributes,
+        IntPtr threadAttributes, bool inheritHandles, uint flags, IntPtr environment, string? currentDirectory, ref StartupInfo startup, out ProcessInformation info);
+
+    /// <summary>
+    /// Start a program as the user signed in to a session, on their desktop, with their variables.
+    /// Only SYSTEM may do this. False when nobody is signed in to the session any more.
+    /// </summary>
+    public static bool StartInSession(int sessionId, string exe)
+    {
+        const uint CreateUnicodeEnvironment = 0x400;
+        const int NoToken = 1008; // ERROR_NO_TOKEN: the session has no signed-in user
+        if (!WTSQueryUserToken(sessionId, out var token))
+        {
+            int error = Marshal.GetLastWin32Error();
+            if (error == NoToken) return false;
+            throw new System.ComponentModel.Win32Exception(error, $"can't get the user of session {sessionId}");
+        }
+        using (token)
+        {
+            if (!CreateEnvironmentBlock(out var env, token, false))
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "can't read the user's variables");
+            try
+            {
+                var startup = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>(), lpDesktop = @"winsta0\default" };
+                if (!CreateProcessAsUserW(token, null, new System.Text.StringBuilder(QuoteArgument(exe)), IntPtr.Zero, IntPtr.Zero, false,
+                        CreateUnicodeEnvironment, env, Path.GetDirectoryName(exe), ref startup, out var info))
+                    throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), $"can't start {exe}");
+                CloseHandle(info.hThread);
+                CloseHandle(info.hProcess);
+                return true;
+            }
+            finally { DestroyEnvironmentBlock(env); }
+        }
+    }
 }
