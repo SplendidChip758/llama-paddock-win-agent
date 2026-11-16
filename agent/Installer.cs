@@ -42,7 +42,7 @@ public static partial class Installer
     static string ProgramDir => AppContext.BaseDirectory.TrimEnd('\\');
     public static string DataDir => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "llama-paddock-agent");
 
-    public static bool IsCommand(string[] args) => args.Length > 0 && args[0] is "install" or "uninstall" or "detect" or "stop" or "ollama-network";
+    public static bool IsCommand(string[] args) => args.Length > 0 && args[0] is "install" or "uninstall" or "detect" or "stop" or "ollama-network" or "check" or "update";
 
     public static int Run(string[] args)
     {
@@ -52,7 +52,8 @@ public static partial class Installer
         int code = 0;
         try
         {
-            if (args[0] != "detect" && !new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
+            // the tray app checks for updates as the user; installing one takes an administrator
+            if (args[0] is not ("detect" or "check") && !new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator))
                 throw new InvalidOperationException("run this as an administrator");
             switch (args[0])
             {
@@ -62,10 +63,13 @@ public static partial class Installer
                 // before the setup replaces the files the service and the tray apps have open
                 case "stop": StopService(); TraySessions.StopAndRemember(DataDir); break;
                 case "ollama-network": OllamaNetwork(opts, result, warnings); break;
+                case "check": Check(opts, result); break;
+                case "update": Update(opts, result); break;
             }
             result["ok"] = true;
         }
-        catch (Exception e) when (e is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception)
+        catch (Exception e) when (e is InvalidOperationException or IOException or UnauthorizedAccessException or System.ComponentModel.Win32Exception
+            or HttpRequestException or TaskCanceledException)
         {
             result["ok"] = false;
             result["error"] = e.Message;

@@ -219,6 +219,20 @@ try {
     Check 'a failing setup fails the update' ((Finished 300) -and ($u = UpdateState).state -eq 'failed' -and $u.result -match 'previous version was put back') (($u | ConvertTo-Json -Depth 3) + "`n" + ((UpdateLogs) -join "`n"))
     Check 'the failed update''s log comes with it' (($u.log -join "`n") -match 'exit code') ($u | ConvertTo-Json -Depth 3)
     Check 'the previous version runs again' ((Health).version -eq '0.0.1-ci')
+
+    # the tray app's About window: check as the user, update as an administrator, both through the agent's program
+    $env:PADDOCK_UPDATE_URL = 'http://127.0.0.1:11590'
+    $c = & $cmd check --channel dev | Select-Object -Last 1 | ConvertFrom-Json
+    Check 'check finds a newer release' ($c.ok -and $c.current -eq '0.0.1-ci' -and $c.latest -eq '0.0.2-ci' -and $c.newer) ($c | ConvertTo-Json)
+    Remove-Item -Recurse -Force (Join-Path $releases 'v0.0.2-ci')
+    $c = & $cmd check --channel dev | Select-Object -Last 1 | ConvertFrom-Json
+    Check 'check says when this is the newest' ($c.ok -and $c.latest -eq '0.0.1-ci' -and -not $c.newer) ($c | ConvertTo-Json)
+    $c = & $cmd update --channel dev | Select-Object -Last 1 | ConvertFrom-Json
+    Check 'update with nothing newer says so' ($c.ok -and $c.state -eq 'current') ($c | ConvertTo-Json)
+    Remove-Item Env:PADDOCK_UPDATE_URL
+    $users = (Get-Acl (Join-Path $data 'update')).Access | Where-Object {
+      $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value -eq 'S-1-5-32-545' }
+    Check 'users may read the update''s state, not change it' ($users -and -not ($users | Where-Object { $_.FileSystemRights -match 'Write|Modify|FullControl' })) ($users | Out-String)
   }
 
   # --- uninstall -----------------------------------------------------------------
