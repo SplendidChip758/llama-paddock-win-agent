@@ -1,3 +1,9 @@
+## [0.10.0-dev.5](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.4...v0.10.0-dev.5) (2026-11-16)
+
+### Features
+
+* **agent-windows:** update the agent from the dashboard ([#5](https://github.com/SplendidChip758/llama-paddock-win-agent/issues/5)) ([f3b0a30](https://github.com/SplendidChip758/llama-paddock-win-agent/commit/f3b0a300f3be79889e9cef4ae2d737e41faf373e)), closes [SplendidChip758/llama-paddock#15](https://github.com/SplendidChip758/llama-paddock/issues/15)
+
 ## [0.10.0-dev.4](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.3...v0.10.0-dev.4) (2026-11-14)
 
 ### Features
