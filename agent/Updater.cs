@@ -1,8 +1,6 @@
 using System.Diagnostics;
-using System.Net;
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 
 namespace LlamaPaddock.Agent;
 
@@ -14,35 +12,27 @@ namespace LlamaPaddock.Agent;
 /// Everything lives in update\ in the data folder, which only SYSTEM and administrators can change:
 /// nobody else can swap the setup between the check and the run.
 /// </summary>
-public sealed partial class Updater
+public sealed class Updater
 {
-    const string SetupName = "llama-paddock-agent-setup.exe";
-    const string Repo = "SplendidChip758/llama-paddock-win-agent";
+    const string SetupName = Releases.SetupName;
     const int LogLines = 40;
 
     readonly string dir;
     readonly string programDir;
-    readonly string apiBase;
-    readonly string webBase;
+    readonly Releases releases;
     readonly bool canUpdate;
     readonly bool dryRun;
     readonly ILogger log;
     readonly Lock gate = new();
-    readonly HttpClient http;
 
     public Updater(AgentConfig cfg, bool canUpdate, ILogger log)
     {
         dir = Path.Combine(cfg.DataDir, "update");
         programDir = AppContext.BaseDirectory.TrimEnd('\\');
-        // tests serve their own releases: <url>/releases/latest, <url>/releases, <url>/releases/download/<tag>/<file>
-        var url = cfg.Get("PADDOCK_UPDATE_URL").TrimEnd('/');
-        apiBase = url != "" ? url : $"https://api.github.com/repos/{Repo}";
-        webBase = url != "" ? url : $"https://github.com/{Repo}";
+        releases = new Releases(cfg.Get("PADDOCK_UPDATE_URL"), Say);
         this.canUpdate = canUpdate;
         dryRun = cfg.DryRun;
         this.log = log;
-        http = new HttpClient { Timeout = TimeSpan.FromMinutes(5) };
-        http.DefaultRequestHeaders.UserAgent.ParseAdd($"llama-paddock-agent/{Api.Version}");
     }
 
     /// <summary>For /health and /stats: whether the dashboard can update this agent.</summary>
@@ -120,6 +110,28 @@ public sealed partial class Updater
         };
     }
 
+    /// <summary>
+    /// The tray app shows how an update went, from state.json and update.log. Nothing in update\ is
+    /// secret, so users may read it; changing it stays with SYSTEM and administrators.
+    /// </summary>
+    void LetUsersRead(DirectoryInfo folder)
+    {
+        try
+        {
+            var acl = folder.GetAccessControl();
+            acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(
+                new System.Security.Principal.SecurityIdentifier(System.Security.Principal.WellKnownSidType.BuiltinUsersSid, null),
+                System.Security.AccessControl.FileSystemRights.ReadAndExecute,
+                System.Security.AccessControl.InheritanceFlags.ContainerInherit | System.Security.AccessControl.InheritanceFlags.ObjectInherit,
+                System.Security.AccessControl.PropagationFlags.None, System.Security.AccessControl.AccessControlType.Allow));
+            folder.SetAccessControl(acl);
+        }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            log.LogWarning("can't let users read {Folder}: {Message}", folder.FullName, e.Message);
+        }
+    }
+
     /// <summary>The state, with an update whose process is gone marked as failed.</summary>
     State? Current()
     {
@@ -156,10 +168,36 @@ public sealed partial class Updater
         };
         if (!SelfUpdate) throw new HttpError(409, "only the agent's Windows service can update itself: install the agent with its setup");
         if (dryRun) return new { ok = true, dry_run = true, channel };
+        Begin(channel);
+        _ = Task.Run(() => Run(channel));
+        return new { ok = true, channel };
+    }
+
+    /// <summary>
+    /// paddock-agent.exe update, from the tray app (as an administrator): the same update, until the
+    /// runner has taken over. Returns "updating" then, "current" when there's nothing newer, or throws why not.
+    /// </summary>
+    public async Task<string> RunHere(string channel)
+    {
+        try { Begin(channel); }
+        catch (HttpError e) { throw new InvalidOperationException(e.Message); }
+        await Run(channel);
+        State? s;
+        lock (gate) s = Read();
+        return s switch
+        {
+            { state: "failed" } => throw new InvalidOperationException(s.result ?? "the update failed"),
+            { state: "done" } => "current",
+            _ => "updating",
+        };
+    }
+
+    void Begin(string channel)
+    {
         lock (gate)
         {
             if (Current() is { state: "running" }) throw new HttpError(409, "an update is already running");
-            Directory.CreateDirectory(dir);
+            LetUsersRead(Directory.CreateDirectory(dir));
             File.WriteAllText(LogFile, "");
             using var self = Process.GetCurrentProcess();
             Write(new State
@@ -168,8 +206,6 @@ public sealed partial class Updater
                 pid = self.Id, pid_started = StartTime(self),
             });
         }
-        _ = Task.Run(() => Run(channel));
-        return new { ok = true, channel };
     }
 
     async Task Run(string channel)
@@ -177,7 +213,7 @@ public sealed partial class Updater
         try
         {
             Say($"looking for the newest {channel} release");
-            var tag = await Newest(channel);
+            var tag = await releases.Newest(channel);
             if (tag is null)
             {
                 Finish(channel == "stable" ? "there is no stable release yet" : "there is no release yet", failed: true);
@@ -192,10 +228,10 @@ public sealed partial class Updater
             }
             Say($"downloading {tag}");
             var setup = Path.Combine(dir, SetupName);
-            var sums = await Download($"{webBase}/releases/download/{tag}/SHA256SUMS");
+            var sums = await releases.Download(releases.File(tag, "SHA256SUMS"));
             var want = ExpectedHash(System.Text.Encoding.UTF8.GetString(sums))
                 ?? throw new InvalidOperationException($"{tag}'s SHA256SUMS doesn't list {SetupName}");
-            var bytes = await Download($"{webBase}/releases/download/{tag}/{SetupName}");
+            var bytes = await releases.Download(releases.File(tag, SetupName));
             var got = Convert.ToHexStringLower(SHA256.HashData(bytes));
             if (got != want) throw new InvalidOperationException($"the downloaded setup doesn't match {tag}'s SHA256SUMS: nothing was installed");
             await File.WriteAllBytesAsync(setup, bytes);
@@ -239,106 +275,6 @@ public sealed partial class Updater
     static string? ExpectedHash(string sums) =>
         sums.Split('\n').Select(l => l.Trim().Split(' ', 2, StringSplitOptions.TrimEntries))
             .FirstOrDefault(p => p.Length == 2 && p[1].TrimStart('*') == SetupName)?[0].ToLowerInvariant();
-
-    // ---------------------------------------------------------------- releases
-
-    /// <summary>
-    /// The tag of the newest release on the channel: stable = the newest release, dev = the newest
-    /// including prereleases, as the Linux installer picks them. GitHub's API allows 60 calls an hour
-    /// per address, so the releases feed answers when it says no.
-    /// </summary>
-    async Task<string?> Newest(string channel)
-    {
-        var url = channel == "dev" ? $"{apiBase}/releases?per_page=30" : $"{apiBase}/releases/latest";
-        using var req = new HttpRequestMessage(HttpMethod.Get, url);
-        req.Headers.Accept.ParseAdd("application/vnd.github+json");
-        HttpResponseMessage? res = null;
-        Say($"asking {url}");
-        using (var api = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
-        {
-            try { res = await http.SendAsync(req, api.Token); }
-            catch (Exception e) when (e is HttpRequestException or TaskCanceledException) { Say($"GitHub's API didn't answer ({e.Message}); trying the releases feed"); }
-        }
-        using (res)
-        {
-            if (res?.StatusCode == HttpStatusCode.NotFound && channel == "stable") return null;
-            if (res is { IsSuccessStatusCode: true })
-            {
-                using var doc = JsonDocument.Parse(await res.Content.ReadAsStringAsync());
-                var list = doc.RootElement.ValueKind == JsonValueKind.Array ? doc.RootElement.EnumerateArray().ToList() : [doc.RootElement];
-                // a release gets its setup and SHA256SUMS a few minutes after it's published
-                return Highest(list
-                    .Where(r => !(r.TryGetProperty("draft", out var d) && d.GetBoolean()))
-                    .Where(r => r.TryGetProperty("assets", out var a) && a.EnumerateArray().Count(x => x.GetProperty("name").GetString() is SetupName or "SHA256SUMS") == 2)
-                    .Select(r => r.GetProperty("tag_name").GetString()!));
-            }
-            if (res is not null) Say($"GitHub's API answered {(int)res.StatusCode}; trying the releases feed");
-        }
-        var feed = Js.Trim(System.Text.Encoding.UTF8.GetString(await Download($"{webBase}/releases.atom")));
-        // the feed lists published releases only; prereleases are the tags with a "-"
-        var tags = FeedTag().Matches(feed).Select(m => m.Groups[1].Value);
-        return Highest(channel == "dev" ? tags : tags.Where(t => !t.Contains('-')));
-    }
-
-    [GeneratedRegex("href=\"https://github\\.com/[^\"]+/releases/tag/([^\"]+)\"")]
-    private static partial Regex FeedTag();
-
-    static string? Highest(IEnumerable<string> tags) =>
-        tags.Select(t => (tag: t, ver: Semver.Parse(t))).Where(x => x.ver is not null)
-            .OrderByDescending(x => x.ver!, Comparer<Semver>.Create(Semver.Compare)).Select(x => x.tag).FirstOrDefault();
-
-    /// <summary>A download, tried again on GitHub's intermittent 5xx and timeouts.</summary>
-    async Task<byte[]> Download(string url)
-    {
-        int[] delays = [2, 5, 10, 0];
-        for (int i = 0; ; i++)
-        {
-            try
-            {
-                Say($"downloading {url}");
-                using var res = await http.GetAsync(url);
-                if (res.StatusCode == HttpStatusCode.NotFound) throw new InvalidOperationException($"{url} isn't there (404)");
-                if (res.IsSuccessStatusCode) return await res.Content.ReadAsByteArrayAsync();
-                if (i == delays.Length - 1) throw new InvalidOperationException($"{url} answered {(int)res.StatusCode}");
-            }
-            catch (Exception e) when (e is HttpRequestException or TaskCanceledException)
-            {
-                if (i == delays.Length - 1) throw new InvalidOperationException($"can't download {url}: {e.Message}");
-            }
-            await Task.Delay(TimeSpan.FromSeconds(delays[i]));
-        }
-    }
-
-    /// <summary>v1.2.3 and v1.2.3-dev.4, ordered as semantic versions: a prerelease before its release.</summary>
-    sealed record Semver(int Major, int Minor, int Patch, string[]? Pre)
-    {
-        public static Semver? Parse(string tag)
-        {
-            var m = Regex.Match(tag, @"^v?(\d+)\.(\d+)\.(\d+)(?:-(.+))?$");
-            if (!m.Success) return null;
-            return new(int.Parse(m.Groups[1].Value), int.Parse(m.Groups[2].Value), int.Parse(m.Groups[3].Value),
-                m.Groups[4].Success ? m.Groups[4].Value.Split('.') : null);
-        }
-
-        public static int Compare(Semver? a, Semver? b)
-        {
-            if (a is null || b is null) return (a is null ? 0 : 1) - (b is null ? 0 : 1);
-            int c = a.Major.CompareTo(b.Major);
-            if (c == 0) c = a.Minor.CompareTo(b.Minor);
-            if (c == 0) c = a.Patch.CompareTo(b.Patch);
-            if (c != 0) return c;
-            if (a.Pre is null || b.Pre is null) return (a.Pre is null ? 0 : -1) - (b.Pre is null ? 0 : -1);
-            for (int i = 0; i < Math.Max(a.Pre.Length, b.Pre.Length); i++)
-            {
-                if (i >= a.Pre.Length) return -1;
-                if (i >= b.Pre.Length) return 1;
-                var (x, y) = (a.Pre[i], b.Pre[i]);
-                if (x == y) continue;
-                return int.TryParse(x, out var nx) && int.TryParse(y, out var ny) ? nx.CompareTo(ny) : string.CompareOrdinal(x, y);
-            }
-            return 0;
-        }
-    }
 
     // ---------------------------------------------------------------- the runner
 
