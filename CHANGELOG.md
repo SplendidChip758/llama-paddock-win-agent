@@ -1,3 +1,9 @@
+## [0.10.0-dev.6](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.5...v0.10.0-dev.6) (2026-11-16)
+
+### Features
+
+* **agent-windows:** show the version and update from the tray app ([#6](https://github.com/SplendidChip758/llama-paddock-win-agent/issues/6)) ([fd36fa4](https://github.com/SplendidChip758/llama-paddock-win-agent/commit/fd36fa4f3ddba602da7bc823d6d9e69ea8231cd3)), closes [SplendidChip758/llama-paddock#15](https://github.com/SplendidChip758/llama-paddock/issues/15)
+
 ## [0.10.0-dev.5](https://github.com/SplendidChip758/llama-paddock-win-agent/compare/v0.10.0-dev.4...v0.10.0-dev.5) (2026-11-16)
 
 ### Features
