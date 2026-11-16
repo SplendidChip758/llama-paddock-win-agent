@@ -10,6 +10,8 @@
 ; /OLLAMANETWORK=0 leaves Ollama listening on localhost only; new installs open it to the network
 ; by default, updates and moves from the Node.js agent only with /OLLAMANETWORK=1.
 ; A silent install that couldn't start the agent exits with code 1; the reason is in the setup log (/LOG=<file>).
+; /UPDATE=1: the agent updating itself from the dashboard (Updater.cs), as SYSTEM. The setup then
+; leaves the tray apps to the service, which starts them again in the sessions they were closed in.
 
 ; ExecAndLogOutput passes the installer's progress to the wizard
 #if Ver < EncodeVer(6, 3, 0)
@@ -246,8 +248,10 @@ begin
   InstallOk := ExecAndLogOutput(ExpandConstant('{app}\{#Agent}'), Args + ' --result ' + AddQuotes(F), '', SW_HIDE,
     ewWaitUntilTerminated, Code, @OnInstallerOutput) and (Code = 0);
   if InstallOk then begin
-    // the tray app belongs in the user's session, not this elevated one; it also starts at every sign-in
-    ExecAsOriginalUser(ExpandConstant('{app}\{#Tray}'), '', '', SW_SHOWNORMAL, ewNoWait, Code);
+    // the tray app belongs in the user's session, not this elevated one; it also starts at every sign-in.
+    // An update's original user is SYSTEM, so there the service starts it again (TraySessions.cs)
+    if ExpandConstant('{param:UPDATE|0}') = '0' then
+      ExecAsOriginalUser(ExpandConstant('{app}\{#Tray}'), '', '', SW_SHOWNORMAL, ewNoWait, Code);
     ResultPage.Description := 'The agent is running.';
     Url := Res('url', F);
     OllamaUrl := Res('ollama_url', F);

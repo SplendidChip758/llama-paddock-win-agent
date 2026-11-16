@@ -252,7 +252,7 @@ public sealed class Stats : IDisposable
         return new { available = true, gpus, processes };
     }
 
-    public async Task<object> Get(string version, int protocol, string? fingerprint)
+    public async Task<object> Get(string version, int protocol, string? fingerprint, bool selfUpdate)
     {
         var nvidia = NvidiaStats();
         var proc = await Task.Run(OllamaProcesses);
@@ -264,6 +264,7 @@ public sealed class Stats : IDisposable
             protocol,
             platform = "windows",
             fingerprint,
+            self_update = selfUpdate,
             system,
             nvidia = await nvidia,
             service = ServiceStatus(proc),

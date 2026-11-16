@@ -55,9 +55,12 @@ var json = new JsonSerializerOptions { PropertyNamingPolicy = null, Encoder = Ja
 // A service runs as another account, so it reaches the Ollama user's session through the tray app;
 // started any other way, the agent is that user.
 // PADDOCK_AGENT_MODE=helper uses the tray app without being a service, for tests.
-IUserSession session = WindowsServiceHelpers.IsWindowsService() || cfg.Get("PADDOCK_AGENT_MODE") == "helper"
+var service = WindowsServiceHelpers.IsWindowsService();
+IUserSession session = service || cfg.Get("PADDOCK_AGENT_MODE") == "helper"
     ? new HelperSession(cfg) : new InProcessSession(cfg);
-var routes = new Api(cfg, session, fingerprint).Routes;
+// only the service may update itself: the setup it runs needs SYSTEM or an administrator
+var updater = new Updater(cfg, service, app.Logger);
+var routes = new Api(cfg, session, fingerprint, updater).Routes;
 
 Task Send(HttpContext ctx, int status, object body)
 {
@@ -102,5 +105,7 @@ app.Logger.LogInformation("llama-paddock agent {Version} (windows) listening on 
 var ollamaUser = session.User();
 app.Logger.LogInformation("Ollama user: {User} ({Mode}), log {Log}",
     ollamaUser?.Name ?? "unknown until Ollama runs", session.Mode, ollamaUser?.LogFile ?? "-");
+// after an update, the tray apps the setup closed
+if (service) TraySessions.Restart(AppContext.BaseDirectory.TrimEnd('\\'), dataDir, app.Logger);
 app.Run();
 return 0;

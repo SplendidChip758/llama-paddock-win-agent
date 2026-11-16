@@ -36,7 +36,7 @@ public static partial class Installer
     const string OllamaListenAll = "0.0.0.0:11434";
     const string RunKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
     const string RunValue = "llama-paddock agent";
-    const string TrayExe = "paddock-agent-tray.exe";
+    const string TrayExe = TraySessions.TrayExe;
     static readonly string[] LegacyFiles = ["agent.json", "agent.key", "agent.crt", "agent-state.json"];
 
     static string ProgramDir => AppContext.BaseDirectory.TrimEnd('\\');
@@ -60,7 +60,7 @@ public static partial class Installer
                 case "uninstall": Uninstall(opts.ContainsKey("keep-data"), warnings); break;
                 case "detect": Detect(result); break;
                 // before the setup replaces the files the service and the tray apps have open
-                case "stop": StopService(); StopTrays(); break;
+                case "stop": StopService(); TraySessions.StopAndRemember(DataDir); break;
                 case "ollama-network": OllamaNetwork(opts, result, warnings); break;
             }
             result["ok"] = true;

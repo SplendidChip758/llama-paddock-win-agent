@@ -1,14 +1,16 @@
 # End-to-end test of the setup and the service, as an administrator in PowerShell 7 (CI's windows-latest):
-#   pwsh test\service.ps1 -Setup dist\llama-paddock-agent-setup.exe -FakeOllama <fake ollama.exe>
+#   pwsh test\service.ps1 -Setup dist\llama-paddock-agent-setup.exe -FakeOllama <fake ollama.exe> [-NextSetup <newer setup>]
 # Fakes a running install of the Node agent (a scheduled task), installs over it silently and checks
 # that the token and the HTTPS key came along. Then the service: this user's files and variables
 # read as SYSTEM, the tray app's pipe between SYSTEM and the user, nothing changed without the tray
-# app, and Ollama started as the user by it. Then an upgrade, and that uninstalling leaves nothing.
+# app, and Ollama started as the user by it. Then an upgrade; with -NextSetup (built as 0.0.1-ci, this
+# one as 0.0.0-ci), updates from the dashboard against fake releases; and that uninstalling leaves nothing.
 # Changes the machine (a service, %ProgramData%, this user's variables, every ollama.exe stopped):
 # run it on a throwaway one.
 param(
   [Parameter(Mandatory)][string]$Setup,
-  [Parameter(Mandatory)][string]$FakeOllama
+  [Parameter(Mandatory)][string]$FakeOllama,
+  [string]$NextSetup = ''
 )
 $ErrorActionPreference = 'Stop'
 $Setup = (Resolve-Path $Setup).Path
@@ -155,6 +157,69 @@ try {
   Check 'the upgrade succeeds' ((RunSetup $Setup) -eq 0)
   $h = Health
   Check 'the upgrade keeps the HTTPS key and the token' ($h.fingerprint -eq $fingerprint -and (Agent GET /env).Status -eq 200)
+
+  # --- updates from the dashboard ---------------------------------------------------
+  if ($NextSetup) {
+    Write-Host '==> updates from the dashboard'
+    $NextSetup = (Resolve-Path $NextSetup).Path
+    $releases = Join-Path $env:RUNNER_TEMP 'fake-releases'
+    New-Item -ItemType Directory -Force $releases | Out-Null
+    Start-Process node -ArgumentList "`"$repo\test\fake-releases.mjs`"", 11590, "`"$releases`"" `
+      -RedirectStandardOutput (Join-Path $env:RUNNER_TEMP 'fake-releases.log') | Out-Null
+    $settings = Get-Content -Raw $agentJson | ConvertFrom-Json
+    $settings | Add-Member -Force PADDOCK_UPDATE_URL 'http://127.0.0.1:11590'
+    [IO.File]::WriteAllText($agentJson, ($settings | ConvertTo-Json), (New-Object Text.UTF8Encoding $false))
+    Restart-Service $name
+    Check 'the service says it can update itself' (WaitFor 30 { (Health).self_update -eq $true })
+    $updateLog = Join-Path $data 'update\update.log'
+    function Release([string]$tag, [string]$file, [string]$hash = '') {
+      $dir = Join-Path $releases $tag
+      New-Item -ItemType Directory -Force $dir | Out-Null
+      Copy-Item -Force $file (Join-Path $dir 'llama-paddock-agent-setup.exe')
+      if (-not $hash) { $hash = (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower() }
+      [IO.File]::WriteAllText((Join-Path $dir 'SHA256SUMS'), "$hash  llama-paddock-agent-setup.exe`n")
+    }
+    # what the agent and the fake releases did, for a failed check
+    function UpdateLogs {
+      foreach ($f in $updateLog, (Join-Path $data 'logs\agent.log'), (Join-Path $env:RUNNER_TEMP 'fake-releases.log')) {
+        "--- $f"; if (Test-Path $f) { Get-Content -Tail 25 $f }
+      }
+    }
+    # the agent restarts during an update, so a call can fail: WaitFor tries again
+    function Finished([int]$seconds) { WaitFor $seconds { (Agent GET /update).Body.state -ne 'running' } }
+    function UpdateState { (Agent GET /update).Body }
+
+    Check 'a channel other than stable or dev is refused' ((Agent POST /update @{ channel = 'nightly' }).Status -eq 400)
+    $r = Agent POST /update @{ channel = 'stable' }
+    Check 'an update starts' ($r.Status -eq 200 -and $r.Body.channel -eq 'stable') ($r | ConvertTo-Json)
+    Check 'a channel without releases fails the update' ((Finished 60) -and ($u = UpdateState).state -eq 'failed' -and $u.result -match 'no stable release') ($u | ConvertTo-Json)
+
+    Release 'v0.0.1-ci' $NextSetup ('0' * 64)
+    $null = Agent POST /update @{ channel = 'dev' }
+    Check 'a setup that doesn''t match SHA256SUMS isn''t run' ((Finished 120) -and ($u = UpdateState).state -eq 'failed' -and $u.result -match 'SHA256SUMS') ($u | ConvertTo-Json)
+    Check 'the agent kept its version' ((Health).version -eq '0.0.0-ci')
+
+    Release 'v0.0.1-ci' $NextSetup
+    Check 'the tray app runs before the update' (WaitFor 10 { (Trays).Count -gt 0 })
+    $r = Agent POST /update @{ channel = 'dev' }
+    Check 'the update starts' ($r.Status -eq 200) ($r | ConvertTo-Json)
+    Check 'a second update meanwhile is refused' ((Agent POST /update @{ channel = 'dev' }).Status -eq 409)
+    Check 'the agent comes back updated' (WaitFor 300 { (Health).version -eq '0.0.1-ci' }) ((UpdateLogs) -join "`n")
+    Check 'the update finishes' ((Finished 60) -and (UpdateState).state -eq 'idle') ((UpdateLogs) -join "`n")
+    Check 'the update keeps the HTTPS key and the token' ((Health).fingerprint -eq $fingerprint -and (Agent GET /env).Status -eq 200)
+    Check 'the service starts the tray app again' (WaitFor 30 { (Trays).Count -gt 0 }) ((UpdateLogs) -join "`n")
+    Check 'the copy of the previous version is removed' (-not (Test-Path (Join-Path $data 'update\previous')))
+
+    $null = Agent POST /update @{ channel = 'dev' }
+    Check 'an update with nothing newer finishes at once' ((Finished 60) -and (UpdateState).state -eq 'idle' -and (Select-String -Path $updateLog -Pattern 'already on v0.0.1-ci' -Quiet)) ((UpdateLogs) -join "`n")
+
+    # a "setup" that exits with an error: the previous version is put back
+    Release 'v0.0.2-ci' (Join-Path $env:SystemRoot 'System32\where.exe')
+    $null = Agent POST /update @{ channel = 'dev' }
+    Check 'a failing setup fails the update' ((Finished 300) -and ($u = UpdateState).state -eq 'failed' -and $u.result -match 'previous version was put back') (($u | ConvertTo-Json -Depth 3) + "`n" + ((UpdateLogs) -join "`n"))
+    Check 'the failed update''s log comes with it' (($u.log -join "`n") -match 'exit code') ($u | ConvertTo-Json -Depth 3)
+    Check 'the previous version runs again' ((Health).version -eq '0.0.1-ci')
+  }
 
   # --- uninstall -----------------------------------------------------------------
   Write-Host '==> uninstall'

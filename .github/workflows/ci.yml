@@ -45,6 +45,8 @@ jobs:
         run: |
           if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
           ./.github/scripts/build-setup.ps1 -Version 0.0.0-ci
+          # a newer one, for the agent to update itself to
+          ./.github/scripts/build-setup.ps1 -Version 0.0.1-ci -Dist dist-next
 
       # the setup from this run, to try it on a real PC: the run's Artifacts section
       - uses: actions/upload-artifact@v7
@@ -57,10 +59,10 @@ jobs:
       - name: Build the fake Ollama
         run: dotnet build test/fake-ollama -c Release -o "$env:RUNNER_TEMP/fake-ollama" -warnaserror
 
-      - name: Install, use, upgrade and uninstall
-        timeout-minutes: 20
+      - name: Install, use, upgrade, update and uninstall
+        timeout-minutes: 30
         shell: pwsh
-        run: ./test/service.ps1 -Setup dist/llama-paddock-agent-setup.exe -FakeOllama "$env:RUNNER_TEMP/fake-ollama/ollama.exe"
+        run: ./test/service.ps1 -Setup dist/llama-paddock-agent-setup.exe -FakeOllama "$env:RUNNER_TEMP/fake-ollama/ollama.exe" -NextSetup dist-next/llama-paddock-agent-setup.exe
 
   # The C# agent replaces the Node agent (test/legacy), so the two have to
   # answer the same: test/compare.mjs runs both on the same files.
