@@ -205,7 +205,7 @@ public sealed partial class Updater
             await File.WriteAllTextAsync(script, RunnerScript);
             var pid = Native.StartDetached("powershell.exe",
                 ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script, "-Dir", dir, "-App", programDir, "-Setup", setup],
-                null, dir, hidden: true);
+                null, dir, hidden: true, console: true);
             using var runner = Process.GetProcessById(pid);
             var startedAt = StartTime(runner);
             Update(s => { s.pid = pid; s.pid_started = startedAt; });
@@ -375,6 +375,14 @@ public sealed partial class Updater
         function Mirror([string]$from, [string]$to) {
           robocopy $from $to /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
           $LASTEXITCODE -lt 8
+        }
+
+        # anything unexpected ends the update as failed, with why, rather than leaving it running
+        trap {
+          Say "the updater stopped: $_"
+          Start-Service $service -ErrorAction SilentlyContinue
+          Finish 'failed' "the updater stopped: $_"
+          exit 1
         }
 
         Say "keeping a copy of $App"

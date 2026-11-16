@@ -151,10 +151,13 @@ static class Native
     /// <summary>
     /// Start a process on its own, as Node's spawn with detached and stdio "ignore": no console of
     /// ours, none of our handles, its own process group. env null keeps ours. Returns its PID.
+    /// console: a console of its own, without a window, instead of none: PowerShell started without
+    /// one never runs its script.
     /// </summary>
-    public static int StartDetached(string exe, IEnumerable<string> args, IReadOnlyDictionary<string, string>? env, string? cwd, bool hidden)
+    public static int StartDetached(string exe, IEnumerable<string> args, IReadOnlyDictionary<string, string>? env, string? cwd, bool hidden,
+        bool console = false)
     {
-        const uint DetachedProcess = 0x08, CreateNewProcessGroup = 0x200, CreateUnicodeEnvironment = 0x400;
+        const uint DetachedProcess = 0x08, CreateNewProcessGroup = 0x200, CreateUnicodeEnvironment = 0x400, CreateNoWindow = 0x08000000;
         const int StartfUseShowWindow = 0x01;
         var commandLine = new System.Text.StringBuilder(string.Join(' ', new[] { exe }.Concat(args).Select(QuoteArgument)));
         var startup = new StartupInfo { cb = Marshal.SizeOf<StartupInfo>() };
@@ -162,7 +165,7 @@ static class Native
         string? block = env is null ? null
             : string.Concat(env.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase).Select(e => $"{e.Key}={e.Value}\0")) + "\0";
         // with no folder in the name, CreateProcess searches the PATH like a shell would
-        if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, DetachedProcess | CreateNewProcessGroup | CreateUnicodeEnvironment,
+        if (!CreateProcessW(null, commandLine, IntPtr.Zero, IntPtr.Zero, false, (console ? CreateNoWindow : DetachedProcess) | CreateNewProcessGroup | CreateUnicodeEnvironment,
                 block, cwd, ref startup, out var info))
             throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), $"can't start {exe}");
         CloseHandle(info.hThread);
